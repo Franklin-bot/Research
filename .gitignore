@@ -152,5 +152,6 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-Dataset/
+Dataset/Motion/
+Dataset/vIMU/
 James/
