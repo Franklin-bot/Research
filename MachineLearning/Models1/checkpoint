@@ -1,0 +1,2 @@
+model_checkpoint_path: "/Users/FranklinZhao/OpenSimProject/MachineLearning/Models1/model_1.ckpt"
+all_model_checkpoint_paths: "/Users/FranklinZhao/OpenSimProject/MachineLearning/Models1/model_1.ckpt"
