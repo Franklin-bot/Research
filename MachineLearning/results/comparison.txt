@@ -34,7 +34,121 @@ Arms Torso Orientation Only 80k
 kinematics MSE: 0.031843106351676635
 IMU MSE: 0.05353437021422322
 
-Arms Torso Orientaion Only IMU Filtered 80k
+Arms Torso Orientation Only IMU Filtered 80k Batch Size 5000
+kinematics MSE: 0.05697378556798332
+IMU MSE: 0.03805697350157704
+
+Arms Torso Orientation Only IMU Filtered 80k Batch Size 750
+kinematics MSE: 0.03805426171858892
+IMU MSE: 0.03361012426517214
+
+Arms Torso Orientation Only IMU Filtered 6hz Bath Size 1000
+kinematics MSE: 0.024692567557950896
+IMU MSE: 0.02107762063636755
+
+Arms Torso Orientation Only IMU Filtered 6hz Batch Size 750
+kinematics MSE: 0.02299346537573954
+IMU MSE: 0.009626785134120568
+
+Arms Torso Orientation Only IMU Filtered 6hz Batch Size 500
 kinematics MSE: 0.019034654614795803
 IMU MSE: 0.021065681115278286
 
+Arms Torso Orientation Only IMU Filtered 6hz Batch Size 250
+kinematics MSE: 0.025621537518027645
+IMU MSE: 0.02392119525748416
+
+Arms Torso Orientation Only IMU 6hz, Kinematics 10hz, Filtered 6hz Batch Size 1000
+0.027020538135753454
+0.03233215816751856
+
+Arms Torso Orientation Only 80k
+kinematics MSE: 0.031843106351676635
+IMU MSE: 0.05353437021422322
+
+Arms Torso Orientation Only IMU 6hz, Kinematics 6hz, Filtered 6hz Batch Size 1000
+0.024860065083640404
+0.01882994937263105
+
+
+
+
+
+
+train: 4 trials expdata, test: last trial expdata
+kinematics MSE: 0.0060621479622166045
+IMU MSE: 0.03163147055297218
+
+train: 4 trials expdata, 10 trials synthdata, test: last trial expdata
+kinematics MSE: 0.00627719820055568
+IMU MSE: 0.022227151539799355
+
+train: 4 trials expdata, 20 trials synthdata, test: last trial expdata
+kinematics MSE: 0.026942908363599687
+IMU MSE: 0.008592928992701965
+
+train: 4 trials expdata, 30 trials synthdata, test: last trial expdata
+kinematics MSE: 0.0023939710842455493
+IMU MSE: 0.005424642983839848
+
+train: 10 trials synthdata, test: first trial expdata
+0.004175828591336682
+0.013948537841361304
+
+train: 10 trials synthdata, test: second trial expdata
+0.0036575090587359083
+0.01267097554290508
+
+train: 10 trials synthdata, test: third trial expdata
+0.004200069223160938
+0.01254399837387074
+
+train: 10 trials synthdata, test: fourth trial expdata
+0.0038317105551747346
+0.011028506240480988
+
+train: 10 trials synthdata, test: fifth trial expdata
+0.005664981613391035
+0.009358481826694832
+
+train: 20 trials synthdata, test: first trial expdata
+0.002786338097879515
+0.013916831623215347
+
+train: 20 trials synthdata, test: second trial expdata
+0.0023401998138976076
+0.01168538447443581
+
+train: 20 trials synthdata, test: third trial expdata
+0.003060579353075333
+0.013637648531668687
+
+train: 20 trials synthdata, test: fourth trial expdata
+0.002881205756450742
+0.0134751760567775
+
+train: 20 trials synthdata, test: fifth trial expdata
+0.0036642510416377136
+0.018651417237188928
+
+
+
+train: 30 trials synthdata, test: first trial expdata
+0.0041223354542693595
+0.013756007515164842
+
+train: 30 trials synthdata, test: first trial expdata
+0.0025986384623039164
+0.011881523821231258
+
+train: 30 trials synthdata, test: first trial expdata
+0.003196673077372928
+0.012726255872118635
+
+train: 30 trials synthdata, test: first trial expdata
+0.0029835901233213283
+0.01360576897736774
+
+train: 30 trials synthdata, test: first trial expdata
+0.005002737645096993
+0.014216439125468034

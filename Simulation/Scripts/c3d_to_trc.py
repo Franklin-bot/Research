@@ -1,6 +1,6 @@
 import opensim as osim
-inputC3d = "/Users/FranklinZhao/OpenSimProject/Simulation/Models/Rajapogal_2015/marker_data/SN001/SN001/SN001_0026_tug_03.c3d"
-outputTRC = "/Users/FranklinZhao/OpenSimProject/Simulation/Models/Rajapogal_2015/marker_data/trc/SN001_0026_tug_03.trc"
+inputC3d = "/home/franklin/Research/Simulation/Models/Rajapogal_2015/marker_data/SN001/SN001/SN001_0028_towel_R01.c3d"
+outputTRC = "/Users/FranklinZhao/OpenSimProject/Simulation/Models/Rajapogal_2015/marker_data/trc/SN001_0028_towel_R01.trc"
 
 
 # convert c3d file into marker and forces data tables
