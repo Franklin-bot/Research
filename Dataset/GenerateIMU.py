@@ -32,60 +32,64 @@ def add_imu_frame(root, body, name, translation, rotation):
     
     orientation = ET.SubElement(physical_offset_frame, 'orientation')
     orientation.text = arrayToString(rotation)
-
 def modifyIMUTranslation(tree, body, imuName, vertical_modifier, radius):
     root = tree.getroot()
-    vertical_modifiers = [[0, 0, 0,], [0, vertical_modifier, 0], [0, -vertical_modifier, 0],[0, 2 * vertical_modifier, 0], [0, -2 * vertical_modifier, 0]]
-    # 1/16ths
-    rotations = [[0, 0, 1.57], [0, 0.393, 1.57], [0, 0.785, 1.57], [0, 1.178, 1.57], [0, 1.571, 1.57], [0, 1.961, 1.57], [0, 2.356, 1.57], [0, 2.7489, 1.57], [0, 3.1416, 1.57], [0, 3.5343, 1.57],\
-           [0, 3.927, 1.57], [0, 4.3197, 1.57], [0, 4.7124, 1.57], [0, 5.1051, 1.57], [0, 5.4978, 1.57], [0, 5.8905, 1.57]]
+    
+    vertical_modifiers = [
+        [0, 0, 0],
+        [0, vertical_modifier, 0],
+        [0, -vertical_modifier, 0],
+        [0, -2 * vertical_modifier, 0],
+        [0, 2 * vertical_modifier, 0],
+        [0, -3 * vertical_modifier, 0],
+    ]
 
-    # 1/8ths
-    # rotations = [[0, 0, 1.57], [0, 0.785, 1.57], [0, 1.571, 1.57], [0, 2.356, 1.57], [0, 3.1416, 1.57], [0, 3.927, 1.57], [0, 4.7124, 1.57], [0, 5.4978, 1.57]]
+    rotations = [
+        [0, 3.7699, 1.57],
+        [0, 4.3982, 1.57],
+        [0, 5.0265, 1.57],
+        [0, 5.6549, 1.57],
+        [0, 6.2832, 1.57],
+    ]
+
+    # extra rotations in degrees -> radians:
+    extra_deg = [0, 30, -30]
+    extra_rad = [np.deg2rad(d) for d in extra_deg]
+
     component_set = root.find(".//ComponentSet[@name='componentset']/objects")
 
-    curr_position = root.find(f".//Body[@name='{body}']/components/PhysicalOffsetFrame[@name='{imuName}']/translation")
-    curr_position = curr_position.text
-    curr_position = parseStringArray(curr_position)
+    curr_position = root.find(
+        f".//Body[@name='{body}']/components/PhysicalOffsetFrame[@name='{imuName}']/translation"
+    )
+    curr_position = parseStringArray(curr_position.text)
     curr_position[0] = 0
     curr_position = arrayToString(curr_position)
 
-    # curr_position = [-radius/2, 0, 0]
-    # curr_position = arrayToString(curr_position)
-
-
-# augment vertically and horizontally
     imuNum = 1
     for m in vertical_modifiers:
         for r in rotations:
-            new_imu_name = f"{imuName}{imuNum+1}"
-            new_imu_position = np.array(parseStringArray(curr_position)) + np.array(m)
+            base_position = np.array(parseStringArray(curr_position)) + np.array(m)
+
+            # position around the body using r[1] (your azimuth)
             new_x_position = radius * np.sin(r[1])
             new_z_position = radius * np.cos(r[1])
-            new_imu_position += np.array([new_x_position, 0, new_z_position])
-            new_imu_frame = f"{new_imu_name}_frame"
-            add_imu_frame(root, body, new_imu_frame, new_imu_position, r)
-            add_imu(component_set, new_imu_name, f'/bodyset/{body}/'+new_imu_name+'_frame')
+            base_position = base_position + np.array([new_x_position, 0, new_z_position])
+
+            # NOW: create 3 IMUs for this one placement
+            for k, delta in enumerate(extra_rad):
+                new_imu_name = f"{imuName}{imuNum+1}_{extra_deg[k]}deg"
+                new_imu_frame = f"{new_imu_name}_frame"
+
+                # apply 0/+30/-30 to ry (index 1)
+                r_new = [r[0], r[1], r[2] + delta]
+
+                add_imu_frame(root, body, new_imu_frame, base_position, r_new)
+                add_imu(component_set, new_imu_name, f"/bodyset/{body}/{new_imu_frame}")
+
             imuNum += 1
-            print(r)
 
-# only augment horizontally
-    # imuNum = 1
-    # for r in rotations:
-    #     new_imu_name = f"{imuName}{imuNum+1}"
-    #     new_imu_position = np.array(parseStringArray(curr_position))
-    #     new_x_position = radius * np.sin(r[1])
-    #     new_z_position = radius * np.cos(r[1])
-    #     new_imu_position += np.array([new_x_position, 0, new_z_position])
-    #     new_imu_frame = f"{new_imu_name}_frame"
-    #     add_imu_frame(root, body, new_imu_frame, new_imu_position, r)
-    #     add_imu(component_set, new_imu_name, f'/bodyset/{body}/'+new_imu_name+'_frame')
-    #     imuNum += 1
-    #     print(r)
-
-
-# Save the modified XML to a new file
     return tree
+
     
 
 def parseStringArray(str):
@@ -112,7 +116,11 @@ tree = modifyIMUTranslation(tree, "ulna_l", "ulna_l_imu", vertical_translation, 
 tree = modifyIMUTranslation(tree, "ulna_r", "ulna_r_imu", vertical_translation, lower_radius)
 tree = modifyIMUTranslation(tree, "humerus_l", "humerus_l_imu", vertical_translation, upper_radius)
 tree = modifyIMUTranslation(tree, "humerus_r", "humerus_r_imu", vertical_translation, upper_radius)
+<<<<<<< HEAD
 tree.write('rajapogal_synthetic_imu.osim')
+=======
+tree.write('rajapogal_half_radial_imu.osim')
+>>>>>>> 655fb3d (update script)
 
 # tree = ET.parse(filepath)
 # tree = modifyIMUTranslation(tree, "pelvis", "pelvis_imu", 0, 0.14)
