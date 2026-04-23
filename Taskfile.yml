@@ -1,0 +1,26 @@
+version: "3"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  generate-rajapogal-imu:
+    desc: Generate the half-radial IMU OpenSim model
+    cmds:
+      - |
+        PYTHON_BIN="${PYTHON:-python3}"
+
+        if command -v "${PYTHON_BIN}" >/dev/null 2>&1 && "${PYTHON_BIN}" -c "import numpy" >/dev/null 2>&1; then
+          "${PYTHON_BIN}" src/dataset/GenerateIMU.py
+        elif command -v uv >/dev/null 2>&1; then
+          uv run --no-project --with numpy python src/dataset/GenerateIMU.py
+        else
+          echo "numpy is required. Install it with: ${PYTHON_BIN} -m pip install numpy" >&2
+          exit 1
+        fi
+    sources:
+      - src/dataset/GenerateIMU.py
+    generates:
+      - rajapogal_half_radial_imu.osim

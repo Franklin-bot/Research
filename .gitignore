@@ -152,12 +152,6 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-Dataset/Motion/
-Dataset/vIMU/
-Dataset/ML
-MachineLearning/results
-MachineLearning/plots
-MachineLearning/models
-James/
-
 .DS_Store
+data/motions
+data/ml
