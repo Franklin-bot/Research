@@ -24,3 +24,21 @@ tasks:
       - src/dataset/GenerateIMU.py
     generates:
       - rajapogal_half_radial_imu.osim
+
+  format-ml-dataset:
+    desc: Format the synthetic IMU and kinematics data for ML training
+    cmds:
+      - |
+        PYTHON_BIN="${PYTHON:-python3}"
+        DATA_DIR="${DATA_DIR:-syndata}"
+
+        if command -v "${PYTHON_BIN}" >/dev/null 2>&1 && "${PYTHON_BIN}" -c "import numpy, polars" >/dev/null 2>&1; then
+          "${PYTHON_BIN}" src/ML/FormatDataset.py --data-dir "${DATA_DIR}"
+        elif command -v uv >/dev/null 2>&1; then
+          uv run --no-project --with numpy --with polars python src/ML/FormatDataset.py --data-dir "${DATA_DIR}"
+        else
+          echo "numpy and polars are required. Install them with: ${PYTHON_BIN} -m pip install numpy polars" >&2
+          exit 1
+        fi
+    sources:
+      - src/ML/FormatDataset.py

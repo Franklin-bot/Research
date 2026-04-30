@@ -251,9 +251,14 @@ def train_whole(sess,vae, input_data, learning_rate=0.0001, batch_size=100, trai
         for i in range(total_batch):
 
             batch_xs_augmented = X_shuffled[batch_size*i:batch_size*i+batch_size] 
-            
-            batch_xs   = np.asarray(batch_xs_augmented) # augmented (masked) data
-            batch_xs_noiseless   = np.asarray(batch_xs_augmented)  # target data
+
+            batch_xs_augmented = np.asarray(batch_xs_augmented)
+            if batch_xs_augmented.shape[1] == vae.n_input * 2:
+                batch_xs = batch_xs_augmented[:, :vae.n_input]
+                batch_xs_noiseless = batch_xs_augmented[:, vae.n_input:]
+            else:
+                batch_xs = batch_xs_augmented
+                batch_xs_noiseless = batch_xs_augmented
             
             # Fit training using batch data
             cost, recon, latent, x_rec, alpha = vae.partial_fit(sess, batch_xs, batch_xs_noiseless, epoch)

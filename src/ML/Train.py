@@ -1,10 +1,7 @@
 import os
 import argparse
-import re
 from pathlib import Path
 import numpy as np
-
-import polars as pl
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -27,6 +24,16 @@ parser.add_argument(
     action="store_true",
     help="Load and validate datasets, then exit before TensorFlow training.",
 )
+parser.add_argument(
+    "--data-dir",
+    default="syndata",
+    help="Dataset name under data/ml and source name under data/motions, e.g. syndata or expdata.",
+)
+parser.add_argument(
+    "--formatted-data-dir",
+    default=None,
+    help="Directory containing formatted train_data.npy and test_data.npy. Defaults to data/ml/<data-dir>.",
+)
 args = parser.parse_args()
 
 filepath = str(PROJECT_ROOT)
@@ -38,188 +45,43 @@ results_dir.mkdir(parents=True, exist_ok=True)
 plots_dir.mkdir(parents=True, exist_ok=True)
 model_dir.mkdir(parents=True, exist_ok=True)
 
-SYN_IMU_DIR = PROJECT_ROOT / "data" / "motions" / "syndata"
-EXP_IMU_DIR = PROJECT_ROOT / "data" / "motions" / "expdata"
-SYN_IMU_PREFIX = "syndata"
-EXP_IMU_PREFIX = "expdata"
-SYN_KINEMATICS_PATH = PROJECT_ROOT / "data" / "motions" / "syndata" / "syndata.mot"
-EXP_KINEMATICS_PATH = PROJECT_ROOT / "data" / "motions" / "expdata" / "expdata.mot"
+ML_DATA_ROOT = PROJECT_ROOT / "data" / "ml"
+ML_DATA_DIR = (
+    Path(args.formatted_data_dir)
+    if args.formatted_data_dir is not None
+    else ML_DATA_ROOT / args.data_dir
+)
+TRAIN_DATA_PATH = ML_DATA_DIR / "train_data.npy"
+TEST_DATA_PATH = ML_DATA_DIR / "test_data.npy"
 
-
-def split_many_cols_named(df, n_values, suffixes):
-    splits = n_values - 1
-    out = []
-
-    for c in df.columns:
-        s = pl.col(c).str.split_exact(",", splits)
-        for i, suf in enumerate(suffixes):
-            out.append(
-                s.struct.field(f"field_{i}")
-                .cast(pl.Float64)
-                .alias(f"{c}_{suf}")
-            )
-
-    return df.select(out)
-
-
-def select_row_columns(df, angle_suffix, row_position, rotations_per_vertical=5, imu_start=2):
-    """
-    Pick one vertical IMU row when IMUs are indexed with 5 rotational placements per vertical height.
-    row_position is the 0-based vertical index (e.g., 0..4 for a 5-row setup).
-    """
-    angle_cols = [c for c in df.columns if c.endswith(angle_suffix)]
-    selected_cols = []
-    matched_imu_cols = 0
-    for c in angle_cols:
-        match = re.match(r"^(.*_imu)(\d+)" + re.escape(angle_suffix) + r"$", c)
-        if match is None:
-            continue
-
-        imu_index = int(match.group(2))
-        vertical_index = (imu_index - imu_start) // rotations_per_vertical
-        if vertical_index != row_position:
-            continue
-
-        selected_cols.append(c)
-        matched_imu_cols += 1
-
-    if matched_imu_cols == 0:
-        raise ValueError(
-            f"No IMU columns matched row position {row_position} "
-            f"for suffix {angle_suffix}."
-        )
-
-    # Normalize names across row positions so vertical concat works.
-    # Different rows pick different source columns (imu2/imu3/...), but
-    # they must map into the same feature schema.
-    return df.select(
-        [pl.col(c).alias(f"imu_slot_{i:03d}") for i, c in enumerate(selected_cols)]
+if not TRAIN_DATA_PATH.exists() or not TEST_DATA_PATH.exists():
+    raise FileNotFoundError(
+        "Formatted datasets not found under data/ml. "
+        "Run src/ML/FormatDataset.py first."
     )
 
+train_data = np.load(TRAIN_DATA_PATH)
+test_data = np.load(TEST_DATA_PATH)
 
-def read_imu_tables(imu_dir, imu_prefix):
-    quaternion_data = pl.read_csv(
-        imu_dir / f"{imu_prefix}_orientations.sto",
-        separator="\t",
-        skip_rows=4,
-    ).with_columns(pl.col("time").cast(pl.Float64))
-
-    velocity_data = pl.read_csv(
-        imu_dir / f"{imu_prefix}_angular_velocity.sto",
-        separator="\t",
-        skip_rows=4,
-    ).with_columns(pl.col("time").cast(pl.Float64))
-
-    acceleration_data = pl.read_csv(
-        imu_dir / f"{imu_prefix}_linear_accelerations.sto",
-        separator="\t",
-        skip_rows=4,
-    ).with_columns(pl.col("time").cast(pl.Float64))
-
-    return quaternion_data, velocity_data, acceleration_data
-
-
-def read_kinematics(kinematics_path):
-    return pl.read_csv(
-        kinematics_path,
-        separator="\t",
-        skip_rows=7,
-        ignore_errors=True,
-    ).with_columns(pl.col("time").cast(pl.Float64))
-
-
-def create_kinematics_instance(kinematics_data):
-    kinematics_cols = [
-        "lumbar_extension",
-        "lumbar_bending",
-        "lumbar_rotation",
-        "arm_flex_r",
-        "arm_add_r",
-        "arm_rot_r",
-        "elbow_flex_r",
-        "pro_sup_r",
-        "arm_flex_l",
-        "arm_add_l",
-        "arm_rot_l",
-        "elbow_flex_l",
-        "pro_sup_l",
-    ]
-    return kinematics_data.select([pl.col(c) for c in kinematics_cols])
-
-
-def create_imu_orientation_instance(quaternion_data, angle_suffix, row_position):
-    row_filtered = select_row_columns(
-        quaternion_data,
-        angle_suffix,
-        row_position,
-    )
-    return split_many_cols_named(row_filtered, 4, ["qw", "qx", "qy", "qz"])
-
-
-def build_dataset_for_rows(
-    imu_dir,
-    imu_prefix,
-    kinematics_path,
-    row_positions,
-    angle_suffix="_0deg",
-):
-    quaternion_data, _, _ = read_imu_tables(imu_dir, imu_prefix)
-    kinematics_data = read_kinematics(kinematics_path)
-    kin_df = create_kinematics_instance(kinematics_data)
-
-    dataset_frames = []
-    for row_pos in row_positions:
-        imu_df = create_imu_orientation_instance(quaternion_data, angle_suffix, row_pos)
-        if imu_df.height != kin_df.height:
-            min_rows = min(kin_df.height, imu_df.height)
-            print(
-                f"Row mismatch for IMU row {row_pos}: "
-                f"kin={kin_df.height}, imu={imu_df.height}. "
-                f"Using first {min_rows} rows."
-            )
-            kin_use = kin_df.slice(0, min_rows)
-            imu_use = imu_df.slice(0, min_rows)
-        else:
-            kin_use = kin_df
-            imu_use = imu_df
-        dataset_frames.append(pl.concat([kin_use, imu_use], how="horizontal"))
-
-    dataset = pl.concat(dataset_frames, how="vertical")
-    return dataset.to_numpy()
-
-
-# Train/test split from synthetic data by vertical IMU row:
-# Row positions are 0..4 within each 5-row group.
-# Train uses outer rows 0,1,3,4; test uses middle row 2.
-train_data = build_dataset_for_rows(
-    SYN_IMU_DIR,
-    SYN_IMU_PREFIX,
-    SYN_KINEMATICS_PATH,
-    [0, 1, 3, 4],
-    angle_suffix="_0deg",
-)
-
-test_data = build_dataset_for_rows(
-    SYN_IMU_DIR,
-    SYN_IMU_PREFIX,
-    SYN_KINEMATICS_PATH,
-    [2],
-    angle_suffix="_0deg",
-)
-
-print(f"Train Data: {train_data.shape}")
+print(f"Train Data (augmented paired): {train_data.shape}")
 print(f"Test Data: {test_data.shape}")
 
 n_samples = train_data.shape[0]
-input_dim = train_data.shape[1]
-imu_dim = input_dim - 13
+input_dim = test_data.shape[1]
+kin_dim = 13
+imu_dim = input_dim - kin_dim
 print(f"n_samples: {n_samples}")
-print(f"n_input: {input_dim} (kin=13, imu={imu_dim})")
+print(f"n_input: {input_dim} (kin={kin_dim}, imu={imu_dim})")
+
+if train_data.shape[1] != input_dim * 2:
+    raise ValueError(
+        f"Expected paired train dataset width {input_dim * 2}, got {train_data.shape[1]}."
+    )
 
 if test_data.shape[1] != input_dim:
     raise ValueError(
-        f"Feature mismatch: train={input_dim}, test={test_data.shape[1]}. "
-        "Train/test feature dimensions must match."
+        f"Feature mismatch: input={input_dim}, test={test_data.shape[1]}. "
+        "Test feature dimensions must match the model input."
     )
 
 
@@ -227,11 +89,11 @@ def network_param():
     network_architecture = {
         "n_input": input_dim,
         "n_z": 100,
-        "size_slices": [13, imu_dim],
+        "size_slices": [kin_dim, imu_dim],
         "size_slices_shared": [48, 100],
         "mod0": [95, 48],
         "mod1": [200, 100],
-        "mod0_2": [48, 13],
+        "mod0_2": [48, kin_dim],
         "mod1_2": [100, imu_dim],
         "enc_shared": [350],
         "dec_shared": [350, 148],
