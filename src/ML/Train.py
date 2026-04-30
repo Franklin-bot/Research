@@ -37,6 +37,12 @@ parser.add_argument(
     default=None,
     help="Directory containing formatted train_data.npy and test_data.npy. Defaults to data/ml/<data-dir>.",
 )
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=int(os.environ.get("TRAIN_SEED", "42")),
+    help="Random seed for NumPy and TensorFlow.",
+)
 args = parser.parse_args()
 
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -151,7 +157,14 @@ if args.dry_run:
     print("Dry run complete. Dataset loading and shape checks passed.")
     raise SystemExit(0)
 
+os.environ["PYTHONHASHSEED"] = str(args.seed)
+
 import VAE
+import tensorflow as tf
+
+np.random.seed(args.seed)
+tf.random.set_seed(args.seed)
+print(f"Seed: {args.seed}")
 
 vae_mode = True
 vae_mode_modalities = False

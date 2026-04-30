@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 
-TF_DTYPE = tf.float32
+TF_DTYPE = tf.float64
 
 
 def _glorot_uniform():
@@ -78,7 +78,10 @@ class VariationalAutoencoder(tf.keras.Model):
             _dense(self.size_slices[1], name="mod1_log_sigma"),
         ]
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
+        try:
+            self.optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=self.learning_rate)
+        except (AttributeError, ImportError):
+            self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         self._build_variables()
 
     def _make_mlp(self, layer_sizes, name):
