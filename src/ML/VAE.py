@@ -6,6 +6,8 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 
+TF_DTYPE = tf.float32
+
 
 def _glorot_uniform():
     return tf.keras.initializers.GlorotUniform()
@@ -15,7 +17,7 @@ def _dense(units, activation=None, name=None):
     return tf.keras.layers.Dense(
         units,
         activation=activation,
-        dtype=tf.float64,
+        dtype=TF_DTYPE,
         kernel_initializer=_glorot_uniform(),
         bias_initializer="zeros",
         name=name,
@@ -37,7 +39,7 @@ class VariationalAutoencoder(tf.keras.Model):
         vae_mode=False,
         vae_mode_modalities=False,
     ):
-        super().__init__(dtype=tf.float64, name="variational_autoencoder")
+        super().__init__(dtype=TF_DTYPE, name="variational_autoencoder")
         self.network_architecture = network_architecture
         self.transfer_fct = transfer_fct
         self.learning_rate = learning_rate
@@ -86,14 +88,14 @@ class VariationalAutoencoder(tf.keras.Model):
         )
 
     def _build_variables(self):
-        dummy = tf.zeros((1, self.n_input), dtype=tf.float64)
+        dummy = tf.zeros((1, self.n_input), dtype=TF_DTYPE)
         self._forward(dummy, training=False)
 
     @staticmethod
     def _stable_log_sigma_sq(raw_values):
         # Numerically stable equivalent of the original TF1 expression:
         # log(exp(raw_values) + 1e-4)
-        log_eps = tf.cast(math.log(LOG_SIGMA_EPS), dtype=tf.float64)
+        log_eps = tf.cast(math.log(LOG_SIGMA_EPS), dtype=TF_DTYPE)
         return tf.reduce_logsumexp(
             tf.stack(
                 [
@@ -110,7 +112,7 @@ class VariationalAutoencoder(tf.keras.Model):
 
     def _sample_latent(self, z_mean, z_log_sigma_sq, training):
         if training and self.vae_mode:
-            eps = tf.random.normal(tf.shape(z_mean), 0.0, 1.0, dtype=tf.float64)
+            eps = tf.random.normal(tf.shape(z_mean), 0.0, 1.0, dtype=TF_DTYPE)
             return z_mean + tf.sqrt(tf.exp(z_log_sigma_sq)) * eps
         return z_mean
 
@@ -170,7 +172,7 @@ class VariationalAutoencoder(tf.keras.Model):
         outputs = self._forward(x, training=training)
         x_noiseless_sliced = self._slice_input(x_noiseless, self.size_slices)
 
-        epoch = tf.cast(epoch, tf.float64)
+        epoch = tf.cast(epoch, TF_DTYPE)
         alpha = 1.0 - tf.minimum(epoch / 1000.0, 1.0)
 
         tmp_costs = []
@@ -203,13 +205,19 @@ class VariationalAutoencoder(tf.keras.Model):
             "z_mean": outputs["z_mean"],
         }
 
-    def partial_fit(self, X, X_noiseless, epoch):
-        x = tf.convert_to_tensor(X, dtype=tf.float64)
-        x_noiseless = tf.convert_to_tensor(X_noiseless, dtype=tf.float64)
+    @tf.function(reduce_retracing=True)
+    def _train_step(self, x, x_noiseless, epoch):
         with tf.GradientTape() as tape:
             losses = self.compute_losses(x, x_noiseless, epoch, training=True)
         grads = tape.gradient(losses["cost"], self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        return losses
+
+    def partial_fit(self, X, X_noiseless, epoch):
+        x = tf.convert_to_tensor(X, dtype=TF_DTYPE)
+        x_noiseless = tf.convert_to_tensor(X_noiseless, dtype=TF_DTYPE)
+        epoch = tf.convert_to_tensor(epoch, dtype=TF_DTYPE)
+        losses = self._train_step(x, x_noiseless, epoch)
         return (
             float(losses["cost"].numpy()),
             float(losses["recon"].numpy()),
@@ -219,19 +227,19 @@ class VariationalAutoencoder(tf.keras.Model):
         )
 
     def transform(self, X):
-        x = tf.convert_to_tensor(X, dtype=tf.float64)
+        x = tf.convert_to_tensor(X, dtype=TF_DTYPE)
         outputs = self.compute_losses(x, x, epoch=1000.0, training=False)
         return outputs["z_mean"].numpy()
 
     def generate(self, z_mu=None):
         if z_mu is None:
             z_mu = np.random.normal(size=(1, self.n_z))
-        z = tf.convert_to_tensor(z_mu, dtype=tf.float64)
+        z = tf.convert_to_tensor(z_mu, dtype=TF_DTYPE)
         x_reconstr, _, _, _ = self._decode_from_latent(z, training=False)
         return x_reconstr.numpy()
 
     def reconstruct(self, X_test):
-        x = tf.convert_to_tensor(X_test, dtype=tf.float64)
+        x = tf.convert_to_tensor(X_test, dtype=TF_DTYPE)
         outputs = self._forward(x, training=False)
         return outputs["x_reconstr"].numpy(), outputs["x_log_sigma_sq"].numpy()
 
