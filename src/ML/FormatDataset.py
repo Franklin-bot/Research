@@ -109,16 +109,45 @@ def create_reference_imu_instance(quaternion_data, velocity_data, acceleration_d
     return pl.concat([q, v, a], how="horizontal")
 
 
-def align_frames(kin_df, imu_df):
-    if imu_df.height != kin_df.height:
-        min_rows = min(kin_df.height, imu_df.height)
-        print(
-            "Row mismatch between kinematics and IMU signals: "
-            f"kin={kin_df.height}, imu={imu_df.height}. Using first {min_rows} rows."
+def align_kinematics_to_imu_time(kinematics_data, kin_df, quaternion_data, imu_df):
+    kin_time = kinematics_data["time"].to_numpy()
+    imu_time = quaternion_data["time"].to_numpy()
+
+    valid_mask = (imu_time >= kin_time.min()) & (imu_time <= kin_time.max())
+    if not np.any(valid_mask):
+        raise ValueError("No overlapping time range between kinematics and IMU data.")
+
+    imu_time_valid = imu_time[valid_mask]
+    imu_df = imu_df.filter(pl.Series("valid_mask", valid_mask))
+
+    interpolated_columns = {}
+    for col in kin_df.columns:
+        interpolated_columns[col] = np.interp(
+            imu_time_valid,
+            kin_time,
+            kin_df[col].to_numpy(),
         )
-        kin_df = kin_df.slice(0, min_rows)
-        imu_df = imu_df.slice(0, min_rows)
-    return kin_df, imu_df
+
+    kin_interpolated_df = pl.DataFrame(interpolated_columns)
+    return kin_interpolated_df, imu_df
+
+
+def minmax_scale_to_signed_unit_range(df):
+    scaled_columns = []
+    for col in df.columns:
+        min_value = df.select(pl.col(col).min()).item()
+        max_value = df.select(pl.col(col).max()).item()
+        if max_value == min_value:
+            scaled_columns.append(pl.lit(0.0).alias(col))
+            continue
+
+        scaled_columns.append(
+            (
+                ((pl.col(col) - min_value) / (max_value - min_value)) * 2.0 - 1.0
+            ).alias(col)
+        )
+
+    return df.select(scaled_columns)
 
 
 def build_reference_dataset_frame(imu_dir, imu_prefix, kinematics_path):
@@ -126,7 +155,18 @@ def build_reference_dataset_frame(imu_dir, imu_prefix, kinematics_path):
     kinematics_data = read_kinematics(kinematics_path)
     kin_df = create_kinematics_instance(kinematics_data)
     imu_df = create_reference_imu_instance(quaternion_data, velocity_data, acceleration_data)
-    kin_df, imu_df = align_frames(kin_df, imu_df)
+    kin_df, imu_df = align_kinematics_to_imu_time(
+        kinematics_data,
+        kin_df,
+        quaternion_data,
+        imu_df,
+    )
+    scaled_original_df = minmax_scale_to_signed_unit_range(
+        pl.concat([kin_df, imu_df], how="horizontal")
+    )
+
+    kin_df = scaled_original_df.select(kin_df.columns)
+    imu_df = scaled_original_df.select(imu_df.columns)
 
     imu_current = imu_df.slice(1).select([pl.col(c).alias(f"{c}_t") for c in imu_df.columns])
     imu_prev = imu_df.slice(0, imu_df.height - 1).select(

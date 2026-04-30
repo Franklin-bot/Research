@@ -1,11 +1,14 @@
 import os
 import argparse
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODEL_BASENAME = "model_1"
+MASK_VALUE = -2.0
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -36,14 +39,17 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-filepath = str(PROJECT_ROOT)
-outputs_dir = PROJECT_ROOT / "outputs" / "ml"
+run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+outputs_dir = PROJECT_ROOT / "data" / "outputs" / args.data_dir / run_id
 results_dir = outputs_dir / "results"
 plots_dir = outputs_dir / "plots"
-model_dir = outputs_dir / "models" / "Models1"
+model_dir = outputs_dir / "models"
+checkpoint_prefix = model_dir / MODEL_BASENAME
 results_dir.mkdir(parents=True, exist_ok=True)
 plots_dir.mkdir(parents=True, exist_ok=True)
 model_dir.mkdir(parents=True, exist_ok=True)
+print(f"Run ID: {run_id}")
+print(f"Run output directory: {outputs_dir}")
 
 ML_DATA_ROOT = PROJECT_ROOT / "data" / "ml"
 ML_DATA_DIR = (
@@ -101,6 +107,13 @@ def network_param():
     return network_architecture
 
 
+def mask_imu_t_features(data, kin_dim, imu_dim, mask_value=MASK_VALUE):
+    masked = np.array(data, copy=True)
+    imu_t_end = kin_dim + (imu_dim // 2)
+    masked[:, kin_dim:imu_t_end] = mask_value
+    return masked
+
+
 epochs = args.epochs
 learning_rate = 0.0001
 batch_size = 12000
@@ -138,22 +151,12 @@ if args.dry_run:
     print("Dry run complete. Dataset loading and shape checks passed.")
     raise SystemExit(0)
 
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
-
 import VAE
-
-VAE.n_samples = n_samples
-VAE.filepath = filepath
-
-# Train network
-sess = tf.InteractiveSession()
 
 vae_mode = True
 vae_mode_modalities = False
 
 vae = VAE.VariationalAutoencoder(
-    sess,
     network_param(),
     learning_rate=learning_rate,
     batch_size=batch_size,
@@ -163,36 +166,31 @@ vae = VAE.VariationalAutoencoder(
 
 print("Training")
 epoch_list, avg_cost_list, avg_recon_list, avg_latent_list = VAE.train_whole(
-    sess,
     vae,
     train_data,
+    checkpoint_prefix=str(checkpoint_prefix),
     training_epochs=epochs,
     batch_size=batch_size,
 )
 vae.cleanup()
-sess.close()
 
-with tf.Graph().as_default():
-    with tf.Session() as sess:
-        network_architecture = network_param()
-        print(network_architecture)
+network_architecture = network_param()
+print(network_architecture)
 
-        model = VAE.VariationalAutoencoder(
-            sess,
-            network_architecture,
-            batch_size=test_data.shape[0],
-            learning_rate=0.00001,
-            vae_mode=False,
-            vae_mode_modalities=False,
-        )
+model = VAE.VariationalAutoencoder(
+    network_architecture,
+    batch_size=test_data.shape[0],
+    learning_rate=0.00001,
+    vae_mode=False,
+    vae_mode_modalities=False,
+)
+model.load_checkpoint(str(checkpoint_prefix))
+print("Model restored.")
 
-        new_saver = tf.train.Saver()
-        new_saver.restore(sess, str(model_dir / "model_1.ckpt"))
-        print("Model restored.")
-
-        print("Test 1")
-        output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(sess, test_data)
-        model.cleanup()
+print("Test 1")
+masked_test_data = mask_imu_t_features(test_data, kin_dim, imu_dim)
+output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(masked_test_data)
+model.cleanup()
 
 np.savetxt(
     results_dir / "output_data.csv",
@@ -202,20 +200,62 @@ np.savetxt(
 print("Output Data Saved!")
 
 # Quick summary metrics and preview plot
+imu_t_end = kin_dim + (imu_dim // 2)
 mse_total = float(np.mean((test_data - output_data) ** 2))
-mse_kin = float(np.mean((test_data[:, :13] - output_data[:, :13]) ** 2))
-mse_imu = float(np.mean((test_data[:, 13:] - output_data[:, 13:]) ** 2))
+mse_kin = float(np.mean((test_data[:, :kin_dim] - output_data[:, :kin_dim]) ** 2))
+mse_imu = float(np.mean((test_data[:, kin_dim:] - output_data[:, kin_dim:]) ** 2))
+mse_imu_t = float(
+    np.mean((test_data[:, kin_dim:imu_t_end] - output_data[:, kin_dim:imu_t_end]) ** 2)
+)
+mse_imu_tminus1 = float(
+    np.mean((test_data[:, imu_t_end:] - output_data[:, imu_t_end:]) ** 2)
+)
 print(f"MSE total: {mse_total:.8f}")
 print(f"MSE kinematics: {mse_kin:.8f}")
 print(f"MSE IMU: {mse_imu:.8f}")
+print(f"MSE IMU(t): {mse_imu_t:.8f}")
+print(f"MSE IMU(t-1): {mse_imu_tminus1:.8f}")
 
 pdf_path = plots_dir / args.plot_filename
 
 with PdfPages(pdf_path) as pdf:
+    plt.figure(figsize=(8.5, 11))
+    plt.axis("off")
+    summary_lines = [
+        "Run Summary",
+        "",
+        f"Dataset: {args.data_dir}",
+        f"Run ID: {run_id}",
+        f"Train shape: {train_shape}",
+        f"Test shape: {test_shape}",
+        "Evaluation input: masked imu_t, clean target",
+        "",
+        f"MSE total: {mse_total:.8f}",
+        f"MSE kinematics: {mse_kin:.8f}",
+        f"MSE IMU: {mse_imu:.8f}",
+        f"MSE IMU(t): {mse_imu_t:.8f}",
+        f"MSE IMU(t-1): {mse_imu_tminus1:.8f}",
+        "",
+        f"Results CSV: {results_dir / 'output_data.csv'}",
+        f"Checkpoint prefix: {checkpoint_prefix}",
+    ]
+    plt.text(
+        0.05,
+        0.95,
+        "\n".join(summary_lines),
+        va="top",
+        ha="left",
+        fontsize=12,
+        family="monospace",
+    )
+    pdf.savefig()
+    plt.close()
+
     for feature in range(num_features):
         plt.figure()
         plt.plot(output_data[:, feature], label="reconstructed")
         plt.plot(test_data[:, feature], label="original")
+        plt.plot(masked_test_data[:, feature], label="masked input", linestyle="--", alpha=0.7)
         plt.title(f"Feature {feature}")
         plt.legend()
         plt.xlabel("Sample Index")
@@ -224,3 +264,5 @@ with PdfPages(pdf_path) as pdf:
         plt.close()
 
 print(f"Plots saved: {pdf_path}")
+print(f"Results saved: {results_dir / 'output_data.csv'}")
+print(f"Model checkpoint prefix: {checkpoint_prefix}")
