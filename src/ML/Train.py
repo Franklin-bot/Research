@@ -184,6 +184,7 @@ vae = VAE.VariationalAutoencoder(
     batch_size=batch_size,
     vae_mode=vae_mode,
     vae_mode_modalities=vae_mode_modalities,
+    seed=args.seed,
 )
 
 print("Training")
@@ -205,6 +206,7 @@ model = VAE.VariationalAutoencoder(
     learning_rate=0.00001,
     vae_mode=False,
     vae_mode_modalities=False,
+    seed=args.seed,
 )
 model.load_checkpoint(str(checkpoint_prefix))
 print("Model restored.")
