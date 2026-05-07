@@ -160,11 +160,10 @@ if args.dry_run:
 os.environ["PYTHONHASHSEED"] = str(args.seed)
 
 import VAE
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
+import tensorflow as tf
 
 np.random.seed(args.seed)
-tf.set_random_seed(args.seed)
+tf.random.set_seed(args.seed)
 print(f"Seed: {args.seed}")
 
 vae_mode = True
