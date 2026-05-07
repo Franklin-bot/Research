@@ -1,5 +1,6 @@
 import os
 import argparse
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -42,6 +43,21 @@ parser.add_argument(
     type=int,
     default=int(os.environ.get("TRAIN_SEED", "42")),
     help="Random seed for NumPy and TensorFlow.",
+)
+parser.add_argument(
+    "--batch-size",
+    type=int,
+    default=int(os.environ.get("TRAIN_BATCH_SIZE", "12000")),
+    help="Global training batch size.",
+)
+parser.add_argument(
+    "--distribution",
+    choices=["auto", "none", "mirrored"],
+    default=os.environ.get("TRAIN_DISTRIBUTION", "auto"),
+    help=(
+        "Training distribution strategy. 'auto' uses MirroredStrategy when more than "
+        "one GPU is visible; 'none' always uses a single device."
+    ),
 )
 parser.add_argument(
     "--eval-mode",
@@ -131,7 +147,7 @@ def mask_imu_t_features(data, kin_dim, imu_dim, mask_value=MASK_VALUE):
 
 epochs = args.epochs
 learning_rate = 0.0001
-batch_size = 12000
+batch_size = args.batch_size
 batch_size = min(batch_size, n_samples)
 
 
@@ -171,21 +187,62 @@ os.environ["PYTHONHASHSEED"] = str(args.seed)
 import VAE
 import tensorflow as tf
 
+
+def build_strategy(distribution_mode):
+    visible_gpus = tf.config.list_physical_devices("GPU")
+    for gpu in visible_gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError:
+            pass
+
+    if distribution_mode == "none":
+        return None, visible_gpus
+
+    if distribution_mode == "mirrored":
+        if not visible_gpus:
+            print("No GPUs visible. Falling back to single-device execution.")
+            return None, visible_gpus
+        return tf.distribute.MirroredStrategy(), visible_gpus
+
+    if len(visible_gpus) > 1:
+        return tf.distribute.MirroredStrategy(), visible_gpus
+
+    return None, visible_gpus
+
+
 np.random.seed(args.seed)
 tf.random.set_seed(args.seed)
 print(f"Seed: {args.seed}")
 
+strategy, visible_gpus = build_strategy(args.distribution)
+print(f"Visible GPUs: {len(visible_gpus)}")
+if strategy is None:
+    print("Distribution strategy: single-device")
+else:
+    print(
+        "Distribution strategy: MirroredStrategy "
+        f"({strategy.num_replicas_in_sync} replicas)"
+    )
+    print(
+        "Per-replica batch size: "
+        f"{batch_size // strategy.num_replicas_in_sync}"
+    )
+
 vae_mode = True
 vae_mode_modalities = False
 
-vae = VAE.VariationalAutoencoder(
-    network_param(),
-    learning_rate=learning_rate,
-    batch_size=batch_size,
-    vae_mode=vae_mode,
-    vae_mode_modalities=vae_mode_modalities,
-    seed=args.seed,
-)
+train_scope = strategy.scope() if strategy is not None else nullcontext()
+with train_scope:
+    vae = VAE.VariationalAutoencoder(
+        network_param(),
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        vae_mode=vae_mode,
+        vae_mode_modalities=vae_mode_modalities,
+        seed=args.seed,
+        strategy=strategy,
+    )
 
 print("Training")
 epoch_list, avg_cost_list, avg_recon_list, avg_latent_list = VAE.train_whole(
@@ -200,14 +257,17 @@ vae.cleanup()
 network_architecture = network_param()
 print(network_architecture)
 
-model = VAE.VariationalAutoencoder(
-    network_architecture,
-    batch_size=test_data.shape[0],
-    learning_rate=0.00001,
-    vae_mode=False,
-    vae_mode_modalities=False,
-    seed=args.seed,
-)
+infer_scope = strategy.scope() if strategy is not None else nullcontext()
+with infer_scope:
+    model = VAE.VariationalAutoencoder(
+        network_architecture,
+        batch_size=test_data.shape[0],
+        learning_rate=0.00001,
+        vae_mode=False,
+        vae_mode_modalities=False,
+        seed=args.seed,
+        strategy=strategy,
+    )
 model.load_checkpoint(str(checkpoint_prefix))
 print("Model restored.")
 

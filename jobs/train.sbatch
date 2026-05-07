@@ -15,6 +15,8 @@
 # - Replace pXXXXX with your Quest allocation from `groups`.
 # - General Access GPU jobs use the `gengpu` partition.
 # - To pin a GPU type, use `#SBATCH --gres=gpu:a100:1` or `#SBATCH --gres=gpu:h100:1`.
+# - To shard training across multiple GPUs on one node, submit with more GPUs, e.g.
+#   `sbatch --gres=gpu:4 --export=ALL,DISTRIBUTION=mirrored jobs/train.sbatch`
 # - Logs are written in the submit directory as slurm-<jobname>-<jobid>.out/.err.
 
 set -euo pipefail
@@ -26,12 +28,15 @@ echo "Job ID: ${SLURM_JOB_ID:-local}"
 echo "Host: $(hostname)"
 echo "Started: $(date)"
 echo "Working directory: $(pwd)"
+echo "Requested GPUs: ${SLURM_GPUS_ON_NODE:-1}"
 
 # Runtime knobs. Override with:
-# sbatch --export=ALL,DATA_DIR=syndata,EPOCHS=200,SEED=42,PLOT_FILENAME=run.pdf jobs/train.sbatch
+# sbatch --export=ALL,DATA_DIR=syndata,EPOCHS=200,SEED=42,BATCH_SIZE=12000,DISTRIBUTION=auto,PLOT_FILENAME=run.pdf jobs/train.sbatch
 DATA_DIR="${DATA_DIR:-syndata}"
 EPOCHS="${EPOCHS:-200}"
 SEED="${SEED:-42}"
+BATCH_SIZE="${BATCH_SIZE:-12000}"
+DISTRIBUTION="${DISTRIBUTION:-auto}"
 PLOT_FILENAME="${PLOT_FILENAME:-train_${SLURM_JOB_ID:-local}.pdf}"
 FORMAT_DATASET_FIRST="${FORMAT_DATASET_FIRST:-0}"
 
@@ -70,6 +75,8 @@ uv run python src/ML/Train.py \
     --data-dir "${DATA_DIR}" \
     --plot-filename "${PLOT_FILENAME}" \
     --epochs "${EPOCHS}" \
-    --seed "${SEED}"
+    --seed "${SEED}" \
+    --batch-size "${BATCH_SIZE}" \
+    --distribution "${DISTRIBUTION}"
 
 echo "Finished: $(date)"

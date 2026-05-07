@@ -106,6 +106,7 @@ class VariationalAutoencoder(tf.Module):
         vae_mode=False,
         vae_mode_modalities=False,
         seed=None,
+        strategy=None,
     ):
         super().__init__(name="variational_autoencoder")
         self.network_architecture = network_architecture
@@ -115,6 +116,11 @@ class VariationalAutoencoder(tf.Module):
         self.vae_mode = vae_mode
         self.vae_mode_modalities = vae_mode_modalities
         self.seed = None if seed is None else int(seed)
+        self.strategy = strategy
+        self.num_replicas_in_sync = (
+            strategy.num_replicas_in_sync if strategy is not None else 1
+        )
+        self._step_seed_counter = 0
 
         self.n_mc = 4
         self.n_vis = 4
@@ -202,6 +208,39 @@ class VariationalAutoencoder(tf.Module):
             shape=shape,
             mean=0.0,
             stddev=1.0,
+            dtype=TF_DTYPE,
+        )
+
+    def _next_step_seed(self):
+        if self.seed is None:
+            return None
+        seed_0 = int(self.seed % (2**31 - 1))
+        seed_1 = int(self._step_seed_counter % (2**31 - 1))
+        self._step_seed_counter += 1
+        return tf.convert_to_tensor([seed_0, seed_1], dtype=tf.int32)
+
+    def _sample_training_epsilon(self, shape, step_seed=None):
+        if step_seed is None:
+            return self._random_normal(shape)
+
+        replica_context = tf.distribute.get_replica_context()
+        replica_id = tf.constant(0, dtype=tf.int32)
+        if replica_context is not None:
+            replica_id = tf.cast(
+                replica_context.replica_id_in_sync_group,
+                tf.int32,
+            )
+
+        stateless_seed = tf.stack(
+            [
+                step_seed[0],
+                step_seed[1] * tf.cast(self.num_replicas_in_sync, tf.int32)
+                + replica_id,
+            ]
+        )
+        return tf.random.stateless_normal(
+            shape,
+            seed=stateless_seed,
             dtype=TF_DTYPE,
         )
 
@@ -323,7 +362,7 @@ class VariationalAutoencoder(tf.Module):
             ),
         }
 
-    def _forward(self, x, training=False, epsilon=None):
+    def _forward(self, x, training=False, epsilon=None, step_seed=None):
         mod0_input, mod1_input = self._slice_input(x, self.size_slices)
         mod0_output = self._forward_dense_stack(
             mod0_input,
@@ -349,7 +388,10 @@ class VariationalAutoencoder(tf.Module):
 
         if training and self.vae_mode:
             if epsilon is None:
-                epsilon = self._random_normal(tf.shape(z_mean))
+                epsilon = self._sample_training_epsilon(
+                    tf.shape(z_mean),
+                    step_seed=step_seed,
+                )
             z = z_mean + tf.sqrt(tf.exp(z_log_sigma_sq)) * epsilon
         else:
             z = z_mean
@@ -363,8 +405,21 @@ class VariationalAutoencoder(tf.Module):
         )
         return decoded
 
-    def compute_losses(self, x, x_noiseless, epoch, training, epsilon=None):
-        outputs = self._forward(x, training=training, epsilon=epsilon)
+    def compute_losses(
+        self,
+        x,
+        x_noiseless,
+        epoch,
+        training,
+        epsilon=None,
+        step_seed=None,
+    ):
+        outputs = self._forward(
+            x,
+            training=training,
+            epsilon=epsilon,
+            step_seed=step_seed,
+        )
         x_noiseless_sliced = self._slice_input(x_noiseless, self.size_slices)
 
         epoch = tf.cast(epoch, TF_DTYPE)
@@ -415,23 +470,87 @@ class VariationalAutoencoder(tf.Module):
         }
 
     @tf.function(reduce_retracing=True)
-    def _train_step(self, x, x_noiseless, epoch):
+    def _train_step(self, x, x_noiseless, epoch, step_seed):
         with tf.GradientTape() as tape:
-            losses = self.compute_losses(x, x_noiseless, epoch, training=True)
+            losses = self.compute_losses(
+                x,
+                x_noiseless,
+                epoch,
+                training=True,
+                step_seed=step_seed,
+            )
         gradients = tape.gradient(losses["cost"], self.trainable_variables)
         self.optimizer.apply_gradients(gradients, self.trainable_variables)
         return losses
+
+    @tf.function(reduce_retracing=True)
+    def _distributed_train_step(self, distributed_batch, epoch, step_seed):
+        def replica_step(replica_batch):
+            if tf.shape(replica_batch)[1] == self.n_input * 2:
+                batch_xs = replica_batch[:, : self.n_input]
+                batch_xs_noiseless = replica_batch[:, self.n_input :]
+            else:
+                batch_xs = replica_batch
+                batch_xs_noiseless = replica_batch
+
+            with tf.GradientTape() as tape:
+                losses = self.compute_losses(
+                    batch_xs,
+                    batch_xs_noiseless,
+                    epoch,
+                    training=True,
+                    step_seed=step_seed,
+                )
+
+            gradients = tape.gradient(losses["cost"], self.trainable_variables)
+            replica_context = tf.distribute.get_replica_context()
+            gradients = [
+                replica_context.all_reduce(tf.distribute.ReduceOp.MEAN, gradient)
+                if gradient is not None
+                else None
+                for gradient in gradients
+            ]
+            self.optimizer.apply_gradients(gradients, self.trainable_variables)
+            return {
+                "cost": losses["cost"],
+                "recon": losses["recon"],
+                "latent": losses["latent"],
+                "alpha": losses["alpha"],
+            }
+
+        per_replica_losses = self.strategy.run(replica_step, args=(distributed_batch,))
+        return {
+            name: self.strategy.reduce(
+                tf.distribute.ReduceOp.MEAN,
+                value,
+                axis=None,
+            )
+            for name, value in per_replica_losses.items()
+        }
 
     def partial_fit(self, X, X_noiseless, epoch):
         x = tf.convert_to_tensor(X, dtype=TF_DTYPE)
         x_noiseless = tf.convert_to_tensor(X_noiseless, dtype=TF_DTYPE)
         epoch = tf.convert_to_tensor(epoch, dtype=TF_DTYPE)
-        losses = self._train_step(x, x_noiseless, epoch)
+        step_seed = self._next_step_seed()
+        losses = self._train_step(x, x_noiseless, epoch, step_seed)
         return (
             float(losses["cost"].numpy()),
             float(losses["recon"].numpy()),
             float(losses["latent"].numpy()),
             losses["x_reconstr"].numpy(),
+            float(losses["alpha"].numpy()),
+        )
+
+    def distributed_partial_fit(self, distributed_batch, epoch):
+        epoch = tf.convert_to_tensor(epoch, dtype=TF_DTYPE)
+        step_seed = self._next_step_seed()
+        losses = self._distributed_train_step(distributed_batch, epoch, step_seed)
+        return (
+            float(losses["cost"].numpy()),
+            float(losses["recon"].numpy()),
+            float(losses["latent"].numpy()),
+            None,
             float(losses["alpha"].numpy()),
         )
 
@@ -487,6 +606,13 @@ def train_whole(
     avg_latent_list = []
     last_display_time = time.time()
     n_samples = input_data.shape[0]
+    use_distributed = vae.strategy is not None and vae.num_replicas_in_sync > 1
+
+    if use_distributed and batch_size % vae.num_replicas_in_sync != 0:
+        raise ValueError(
+            "Global batch_size must be divisible by the number of replicas. "
+            f"Got batch_size={batch_size}, replicas={vae.num_replicas_in_sync}."
+        )
 
     for epoch in tqdm(range(training_epochs)):
         avg_cost = 0.0
@@ -496,26 +622,44 @@ def train_whole(
 
         X_shuffled = shuffle_data(input_data)
 
-        for i in range(total_batch):
-            batch_xs_augmented = X_shuffled[
-                batch_size * i : batch_size * i + batch_size
-            ]
-            batch_xs_augmented = np.asarray(batch_xs_augmented)
-            if batch_xs_augmented.shape[1] == vae.n_input * 2:
-                batch_xs = batch_xs_augmented[:, : vae.n_input]
-                batch_xs_noiseless = batch_xs_augmented[:, vae.n_input :]
-            else:
-                batch_xs = batch_xs_augmented
-                batch_xs_noiseless = batch_xs_augmented
-
-            cost, recon, latent, x_rec, alpha = vae.partial_fit(
-                batch_xs,
-                batch_xs_noiseless,
-                epoch,
+        if use_distributed:
+            trimmed = np.asarray(X_shuffled[: total_batch * batch_size], dtype=np.float64)
+            dataset = tf.data.Dataset.from_tensor_slices(trimmed).batch(
+                batch_size,
+                drop_remainder=True,
             )
-            avg_cost += cost / n_samples * batch_size
-            avg_recon += recon / n_samples * batch_size
-            avg_latent += latent / n_samples * batch_size
+            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+            distributed_dataset = vae.strategy.experimental_distribute_dataset(dataset)
+
+            for batch_xs_augmented in distributed_dataset:
+                cost, recon, latent, x_rec, alpha = vae.distributed_partial_fit(
+                    batch_xs_augmented,
+                    epoch,
+                )
+                avg_cost += cost / n_samples * batch_size
+                avg_recon += recon / n_samples * batch_size
+                avg_latent += latent / n_samples * batch_size
+        else:
+            for i in range(total_batch):
+                batch_xs_augmented = X_shuffled[
+                    batch_size * i : batch_size * i + batch_size
+                ]
+                batch_xs_augmented = np.asarray(batch_xs_augmented)
+                if batch_xs_augmented.shape[1] == vae.n_input * 2:
+                    batch_xs = batch_xs_augmented[:, : vae.n_input]
+                    batch_xs_noiseless = batch_xs_augmented[:, vae.n_input :]
+                else:
+                    batch_xs = batch_xs_augmented
+                    batch_xs_noiseless = batch_xs_augmented
+
+                cost, recon, latent, x_rec, alpha = vae.partial_fit(
+                    batch_xs,
+                    batch_xs_noiseless,
+                    epoch,
+                )
+                avg_cost += cost / n_samples * batch_size
+                avg_recon += recon / n_samples * batch_size
+                avg_latent += latent / n_samples * batch_size
 
         if epoch % display_step == 0:
             epoch_list.append(epoch)
