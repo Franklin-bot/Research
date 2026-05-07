@@ -43,6 +43,15 @@ parser.add_argument(
     default=int(os.environ.get("TRAIN_SEED", "42")),
     help="Random seed for NumPy and TensorFlow.",
 )
+parser.add_argument(
+    "--eval-mode",
+    choices=["clean", "masked-imu-t"],
+    default="clean",
+    help=(
+        "Evaluation input mode. 'clean' matches the older v1 reconstruction metric; "
+        "'masked-imu-t' evaluates the harder IMU(t) imputation task."
+    ),
+)
 args = parser.parse_args()
 
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -204,7 +213,13 @@ print("Model restored.")
 
 print("Test 1")
 masked_test_data = mask_imu_t_features(test_data, kin_dim, imu_dim)
-output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(masked_test_data)
+if args.eval_mode == "clean":
+    eval_input = test_data
+    eval_label = "clean reconstruction input"
+else:
+    eval_input = masked_test_data
+    eval_label = "masked imu_t input"
+output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(eval_input)
 model.cleanup()
 
 np.savetxt(
@@ -243,7 +258,7 @@ with PdfPages(pdf_path) as pdf:
         f"Run ID: {run_id}",
         f"Train shape: {train_shape}",
         f"Test shape: {test_shape}",
-        "Evaluation input: masked imu_t, clean target",
+        f"Evaluation input: {eval_label}, clean target",
         "",
         f"MSE total: {mse_total:.8f}",
         f"MSE kinematics: {mse_kin:.8f}",
@@ -270,7 +285,7 @@ with PdfPages(pdf_path) as pdf:
         plt.figure()
         plt.plot(output_data[:, feature], label="reconstructed")
         plt.plot(test_data[:, feature], label="original")
-        plt.plot(masked_test_data[:, feature], label="masked input", linestyle="--", alpha=0.7)
+        plt.plot(eval_input[:, feature], label="evaluation input", linestyle="--", alpha=0.7)
         plt.title(f"Feature {feature}")
         plt.legend()
         plt.xlabel("Sample Index")
