@@ -1,155 +1,33 @@
 import math
 import time
-from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 from tqdm.auto import tqdm
 
-
-class XavierUniformLike(tf.keras.initializers.Initializer):
-    def __init__(self, constant=1.0):
-        self.constant = constant
-
-    def __call__(self, shape, dtype=None):
-        dtype = tf.as_dtype(dtype or tf.float64)
-        fan_in, fan_out = shape
-        limit = self.constant * np.sqrt(1.0 / (fan_in + fan_out))
-        return tf.random.uniform(
-            shape,
-            minval=-limit,
-            maxval=limit,
-            dtype=dtype,
-        )
-
-    def get_config(self):
-        return {"constant": self.constant}
+tf.disable_v2_behavior()
 
 
-class DenseStack(tf.keras.layers.Layer):
-    def __init__(self, layer_sizes, transfer_fct, name):
-        super().__init__(name=name, dtype=tf.float64)
-        self.hidden_layers = [
-            tf.keras.layers.Dense(
-                layer_size,
-                activation=transfer_fct,
-                kernel_initializer=XavierUniformLike(),
-                bias_initializer="zeros",
-                dtype=tf.float64,
-                name=f"{name}_dense_{index}",
-            )
-            for index, layer_size in enumerate(layer_sizes)
-        ]
-
-    def call(self, inputs):
-        layer = inputs
-        for dense in self.hidden_layers:
-            layer = dense(layer)
-        return layer
-
-
-class VariationalProjection(tf.keras.layers.Layer):
-    def __init__(self, latent_size, name):
-        super().__init__(name=name, dtype=tf.float64)
-        self.mean_layer = tf.keras.layers.Dense(
-            latent_size,
-            activation=None,
-            kernel_initializer=XavierUniformLike(),
-            bias_initializer="zeros",
-            dtype=tf.float64,
-            name=f"{name}_mean",
-        )
-        self.var_layer = tf.keras.layers.Dense(
-            latent_size,
-            activation=None,
-            kernel_initializer=XavierUniformLike(),
-            bias_initializer="zeros",
-            dtype=tf.float64,
-            name=f"{name}_var",
-        )
-
-    def call(self, inputs):
-        mean = self.mean_layer(inputs)
-        raw_log_sigma_sq = self.var_layer(inputs)
-        log_sigma_sq = tf.math.log(tf.math.exp(raw_log_sigma_sq) + tf.constant(0.0001, tf.float64))
-        return mean, log_sigma_sq
-
-
-class NativeVariationalAutoencoder(tf.keras.Model):
-    def __init__(self, network_architecture, transfer_fct):
-        super().__init__(name="native_variational_autoencoder", dtype=tf.float64)
-        self.network_architecture = network_architecture
-        self.transfer_fct = transfer_fct
-        self.n_input = network_architecture["n_input"]
-        self.n_z = network_architecture["n_z"]
-
-        self.mod0 = DenseStack(network_architecture["mod0"], transfer_fct, "mod0")
-        self.mod1 = DenseStack(network_architecture["mod1"], transfer_fct, "mod1")
-        self.enc_shared = DenseStack(network_architecture["enc_shared"], transfer_fct, "enc_shared")
-        self.latent_projection = VariationalProjection(self.n_z, "latent_projection")
-        self.dec_shared = DenseStack(network_architecture["dec_shared"], transfer_fct, "dec_shared")
-        self.mod0_2 = DenseStack(network_architecture["mod0_2"], transfer_fct, "mod0_2")
-        self.mod1_2 = DenseStack(network_architecture["mod1_2"], transfer_fct, "mod1_2")
-        self.mod0_projection = VariationalProjection(network_architecture["size_slices"][0], "mod0_projection")
-        self.mod1_projection = VariationalProjection(network_architecture["size_slices"][1], "mod1_projection")
-
-    def _slice_input(self, input_layer, size_mod):
-        return tf.split(input_layer, self.network_architecture[size_mod], axis=1)
-
-    def encode(self, inputs, sample_latent):
-        mod0_input, mod1_input = self._slice_input(inputs, "size_slices")
-        mod0_output = self.mod0(mod0_input)
-        mod1_output = self.mod1(mod1_input)
-
-        encoder_input = tf.concat([mod0_output, mod1_output], axis=1)
-        encoder_output = self.enc_shared(encoder_input)
-        z_mean, z_log_sigma_sq = self.latent_projection(encoder_output)
-
-        if sample_latent:
-            eps = tf.random.normal(
-                tf.stack([tf.shape(inputs)[0], self.n_z]),
-                mean=0.0,
-                stddev=1.0,
-                dtype=tf.float64,
-            )
-            z = z_mean + tf.sqrt(tf.exp(z_log_sigma_sq)) * eps
-        else:
-            z = z_mean
-
-        return z, z_mean, z_log_sigma_sq
-
-    def decode(self, latent):
-        decoder_output = self.dec_shared(latent)
-        mod0_shared, mod1_shared = self._slice_input(decoder_output, "size_slices_shared")
-
-        mod0_output = self.mod0_2(mod0_shared)
-        mod1_output = self.mod1_2(mod1_shared)
-
-        mod0_mean, mod0_log_sigma_sq = self.mod0_projection(mod0_output)
-        mod1_mean, mod1_log_sigma_sq = self.mod1_projection(mod1_output)
-
-        return {
-            "final_means": [mod0_mean, mod1_mean],
-            "final_sigmas": [mod0_log_sigma_sq, mod1_log_sigma_sq],
-            "x_reconstr": tf.concat([mod0_mean, mod1_mean], axis=1),
-            "x_log_sigma_sq": tf.concat([mod0_log_sigma_sq, mod1_log_sigma_sq], axis=1),
-        }
-
-    def call(self, inputs, sample_latent=False):
-        z, z_mean, z_log_sigma_sq = self.encode(inputs, sample_latent=sample_latent)
-        decoded = self.decode(z)
-        decoded.update(
-            {
-                "z": z,
-                "z_mean": z_mean,
-                "z_log_sigma_sq": z_log_sigma_sq,
-            }
-        )
-        return decoded
+def xavier_init(fan_in, fan_out, constant=1):
+    """Xavier initialization of network weights."""
+    low = -constant * np.sqrt(1.0 / (fan_in + fan_out))
+    high = constant * np.sqrt(1.0 / (fan_in + fan_out))
+    return tf.random_uniform(
+        (fan_in, fan_out),
+        minval=low,
+        maxval=high,
+        dtype=tf.float64,
+    )
 
 
 class VariationalAutoencoder(object):
-    """TF2-native VAE wrapped with the current training/inference interface."""
+    """
+    TensorFlow 2 runtime wrapper that preserves the original TF1 graph numerics.
+
+    Exact training parity matters here, so this implementation intentionally keeps
+    the original graph construction, seeded variable order, random ops, and Adam
+    optimizer behavior via tf.compat.v1.
+    """
 
     def __init__(
         self,
@@ -172,147 +50,197 @@ class VariationalAutoencoder(object):
 
         self.n_input = network_architecture["n_input"]
         self.n_z = network_architecture["n_z"]
-        self.size_slices = tuple(network_architecture["size_slices"])
-        self.recon_constant = tf.constant(
-            0.5 * self.n_z / 2 * np.log(2 * math.pi),
-            dtype=tf.float64,
-        )
 
-        self.model = NativeVariationalAutoencoder(network_architecture, transfer_fct)
-        self.optimizer = tf.keras.optimizers.Adam(
-            learning_rate=self.learning_rate,
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-8,
-        )
-        self.profiler = None
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+            self.x = tf.placeholder(tf.float64, [None, self.n_input], name="InputData")
+            self.x_noiseless = tf.placeholder(
+                tf.float64,
+                [None, self.n_input],
+                name="NoiselessData",
+            )
+            self.layers = {}
 
-        dummy_input = tf.zeros((1, self.n_input), dtype=tf.float64)
-        self.model(dummy_input, sample_latent=False)
-        self.optimizer.build(self.model.trainable_variables)
-        self.checkpoint = tf.train.Checkpoint(model=self.model)
-        self._train_step.get_concrete_function(
-            tf.TensorSpec(shape=[None, self.n_input], dtype=tf.float64),
-            tf.TensorSpec(shape=[None, self.n_input], dtype=tf.float64),
-            tf.TensorSpec(shape=[], dtype=tf.float64),
-        )
-        self._transform.get_concrete_function(
-            tf.TensorSpec(shape=[None, self.n_input], dtype=tf.float64)
-        )
-        self._decode.get_concrete_function(
-            tf.TensorSpec(shape=[None, self.n_z], dtype=tf.float64)
-        )
-        self._reconstruct.get_concrete_function(
-            tf.TensorSpec(shape=[None, self.n_input], dtype=tf.float64)
-        )
-
-    def cleanup(self):
-        self.profiler = None
-
-    def _compute_losses(self, outputs, x_noiseless, epoch):
-        x_noiseless_sliced = tf.split(x_noiseless, self.size_slices, axis=1)
-        alpha = tf.constant(1.0, tf.float64) - tf.minimum(
-            epoch / tf.constant(1000.0, tf.float64),
-            tf.constant(1.0, tf.float64),
-        )
-
-        tmp_costs = []
-        for index, size in enumerate(self.size_slices):
-            reconstr_loss = (
-                0.5
-                * tf.reduce_sum(
-                    tf.square(x_noiseless_sliced[index] - outputs["final_means"][index])
-                    / tf.exp(outputs["final_sigmas"][index]),
-                    axis=1,
-                )
-                + 0.5 * tf.reduce_sum(outputs["final_sigmas"][index], axis=1)
-                + self.recon_constant
-            ) / tf.constant(float(size), dtype=tf.float64)
-            tmp_costs.append(reconstr_loss)
-
-        reconstr_loss = tf.reduce_mean(tmp_costs[0] + tmp_costs[1])
-        latent_loss = -0.5 * tf.reduce_sum(
-            1
-            + outputs["z_log_sigma_sq"]
-            - tf.square(outputs["z_mean"])
-            - tf.exp(outputs["z_log_sigma_sq"]),
-            axis=1,
-        )
-        cost = tf.reduce_mean(reconstr_loss + alpha * latent_loss)
-        mean_latent_loss = tf.reduce_mean(latent_loss)
-        return cost, reconstr_loss, mean_latent_loss, alpha
-
-    @tf.function(reduce_retracing=True)
-    def _train_step(self, x, x_noiseless, epoch):
-        with tf.GradientTape() as tape:
-            outputs = self.model(x, sample_latent=self.vae_mode)
-            cost, reconstr_loss, latent_loss, alpha = self._compute_losses(
-                outputs,
-                x_noiseless,
-                epoch,
+            self.n_epoch = tf.placeholder_with_default(
+                tf.zeros([], tf.float64),
+                shape=[],
+                name="EpochValue",
             )
 
-        gradients = tape.gradient(cost, self.model.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
-        return cost, reconstr_loss, latent_loss, outputs["x_reconstr"], alpha
+            self._create_network()
+            self._create_loss_optimizer()
 
-    @tf.function(reduce_retracing=True)
-    def _transform(self, x):
-        _, z_mean, _ = self.model.encode(x, sample_latent=False)
-        return z_mean
+            init = tf.global_variables_initializer()
+            self.saver = tf.train.Saver()
 
-    @tf.function(reduce_retracing=True)
-    def _decode(self, latent):
-        decoded = self.model.decode(latent)
-        return decoded["x_reconstr"]
+        self.sess = tf.Session(graph=self.graph)
+        self.sess.run(init)
+        self.profiler = None
 
-    @tf.function(reduce_retracing=True)
-    def _reconstruct(self, x_test):
-        outputs = self.model(x_test, sample_latent=self.vae_mode)
-        return outputs["x_reconstr"], outputs["x_log_sigma_sq"]
+    def cleanup(self):
+        try:
+            self.sess.close()
+        except Exception:
+            pass
+        self.profiler = None
+
+    def _slice_input(self, input_layer, size_mod):
+        slices = []
+        count = 0
+        for size in self.network_architecture[size_mod]:
+            new_slice = tf.slice(input_layer, [0, count], [-1, size])
+            count += size
+            slices.append(new_slice)
+        return slices
+
+    def _create_partial_network(self, name, input_layer):
+        with tf.name_scope(name):
+            self.layers[name] = [input_layer]
+            for layer_size in self.network_architecture[name]:
+                h = tf.Variable(
+                    xavier_init(int(self.layers[name][-1].get_shape()[1]), layer_size)
+                )
+                b = tf.Variable(tf.zeros([layer_size], dtype=tf.float64))
+                layer = self.transfer_fct(tf.add(tf.matmul(self.layers[name][-1], h), b))
+                self.layers[name].append(layer)
+
+    def _create_variational_network(self, input_layer, latent_size):
+        input_layer_size = int(input_layer.get_shape()[1])
+
+        h_mean = tf.Variable(xavier_init(input_layer_size, latent_size))
+        h_var = tf.Variable(xavier_init(input_layer_size, latent_size))
+        b_mean = tf.Variable(tf.zeros([latent_size], dtype=tf.float64))
+        b_var = tf.Variable(tf.zeros([latent_size], dtype=tf.float64))
+        mean = tf.add(tf.matmul(input_layer, h_mean), b_mean)
+        log_sigma_sq = tf.log(tf.exp(tf.add(tf.matmul(input_layer, h_var), b_var)) + 0.0001)
+        return mean, log_sigma_sq
+
+    def _create_modalities_network(self, names, slices):
+        for i in range(len(names)):
+            self._create_partial_network(names[i], slices[i])
+
+    def _create_mod_variational_network(self, names, sizes_mod):
+        assert len(self.network_architecture[sizes_mod]) == len(names)
+        sizes = self.network_architecture[sizes_mod]
+        self.layers["final_means"] = []
+        self.layers["final_sigmas"] = []
+        for i in range(len(names)):
+            mean, log_sigma_sq = self._create_variational_network(
+                self.layers[names[i]][-1],
+                sizes[i],
+            )
+            self.layers["final_means"].append(mean)
+            self.layers["final_sigmas"].append(log_sigma_sq)
+        global_mean = tf.concat(self.layers["final_means"], 1)
+        global_sigma = tf.concat(self.layers["final_sigmas"], 1)
+        self.layers["global_mean_reconstr"] = [global_mean]
+        self.layers["global_sigma_reconstr"] = [global_sigma]
+        return global_mean, global_sigma
+
+    def _create_network(self):
+        self.x_noiseless_sliced = self._slice_input(self.x_noiseless, "size_slices")
+        slices = self._slice_input(self.x, "size_slices")
+        self._create_modalities_network(["mod0", "mod1"], slices)
+
+        self.output_mod = tf.concat([self.layers["mod0"][-1], self.layers["mod1"][-1]], 1)
+        self.layers["concat"] = [self.output_mod]
+
+        self._create_partial_network("enc_shared", self.output_mod)
+        self.z_mean, self.z_log_sigma_sq = self._create_variational_network(
+            self.layers["enc_shared"][-1],
+            self.n_z,
+        )
+
+        if self.vae_mode:
+            eps = tf.random_normal(tf.stack([tf.shape(self.x)[0], self.n_z]), 0, 1, dtype=tf.float64)
+            self.z = tf.add(self.z_mean, tf.multiply(tf.sqrt(tf.exp(self.z_log_sigma_sq)), eps))
+        else:
+            self.z = self.z_mean
+
+        self._create_partial_network("dec_shared", self.z)
+
+        slices_shared = self._slice_input(self.layers["dec_shared"][-1], "size_slices_shared")
+        self._create_modalities_network(["mod0_2", "mod1_2"], slices_shared)
+
+        self.x_reconstr, self.x_log_sigma_sq = self._create_mod_variational_network(
+            ["mod0_2", "mod1_2"],
+            "size_slices",
+        )
+
+    def _create_loss_optimizer(self):
+        with tf.name_scope("Loss_Opt"):
+            self.alpha = 1 - tf.minimum(self.n_epoch / 1000, 1)
+
+            self.tmp_costs = []
+            for i in range(len(self.layers["final_means"])):
+                reconstr_loss = (
+                    0.5
+                    * tf.reduce_sum(
+                        tf.square(self.x_noiseless_sliced[i] - self.layers["final_means"][i])
+                        / tf.exp(self.layers["final_sigmas"][i]),
+                        1,
+                    )
+                    + 0.5 * tf.reduce_sum(self.layers["final_sigmas"][i], 1)
+                    + 0.5 * self.n_z / 2 * np.log(2 * math.pi)
+                ) / self.network_architecture["size_slices"][i]
+                self.tmp_costs.append(reconstr_loss)
+
+            self.reconstr_loss = tf.reduce_mean(self.tmp_costs[0] + self.tmp_costs[1])
+
+            self.latent_loss = -0.5 * tf.reduce_sum(
+                1 + self.z_log_sigma_sq - tf.square(self.z_mean) - tf.exp(self.z_log_sigma_sq),
+                1,
+            )
+
+            self.cost = tf.reduce_mean(
+                self.reconstr_loss + tf.scalar_mul(self.alpha, self.latent_loss)
+            )
+
+            self.optimizer = tf.train.AdamOptimizer(
+                learning_rate=self.learning_rate
+            ).minimize(self.cost)
+
+            self.m_reconstr_loss = self.reconstr_loss
+            self.m_latent_loss = tf.reduce_mean(self.latent_loss)
 
     def partial_fit(self, X, X_noiseless, epoch):
-        cost, recon, latent, x_rec, alpha = self._train_step(
-            tf.convert_to_tensor(X, dtype=tf.float64),
-            tf.convert_to_tensor(X_noiseless, dtype=tf.float64),
-            tf.convert_to_tensor(float(epoch), dtype=tf.float64),
+        opt, cost, recon, latent, x_rec, alpha = self.sess.run(
+            (
+                self.optimizer,
+                self.cost,
+                self.m_reconstr_loss,
+                self.m_latent_loss,
+                self.x_reconstr,
+                self.alpha,
+            ),
+            feed_dict={
+                self.x: X,
+                self.x_noiseless: X_noiseless,
+                self.n_epoch: epoch,
+            },
         )
-        return (
-            float(cost.numpy()),
-            float(recon.numpy()),
-            float(latent.numpy()),
-            x_rec.numpy(),
-            float(alpha.numpy()),
-        )
+        return cost, recon, latent, x_rec, alpha
 
     def transform(self, X):
-        return self._transform(tf.convert_to_tensor(X, dtype=tf.float64)).numpy()
+        return self.sess.run(self.z_mean, feed_dict={self.x: X})
 
     def generate(self, z_mu=None):
         if z_mu is None:
             z_mu = np.random.normal(size=(1, self.n_z))
-        return self._decode(tf.convert_to_tensor(z_mu, dtype=tf.float64)).numpy()
+        return self.sess.run(self.x_reconstr, feed_dict={self.z: z_mu})
 
     def reconstruct(self, X_test):
-        x_rec_mean, x_rec_log_sigma_sq = self._reconstruct(
-            tf.convert_to_tensor(X_test, dtype=tf.float64)
+        x_rec_mean, x_rec_log_sigma_sq = self.sess.run(
+            (self.x_reconstr, self.x_log_sigma_sq),
+            feed_dict={self.x: X_test, self.x_noiseless: X_test},
         )
-        return x_rec_mean.numpy(), x_rec_log_sigma_sq.numpy()
+        return x_rec_mean, x_rec_log_sigma_sq
 
     def save_checkpoint(self, checkpoint_prefix):
-        checkpoint_path = self.checkpoint.write(checkpoint_prefix)
-        checkpoint_prefix_path = Path(checkpoint_prefix)
-        checkpoint_state_path = checkpoint_prefix_path.parent / "checkpoint"
-        checkpoint_state_path.write_text(
-            'model_checkpoint_path: "{}"\nall_model_checkpoint_paths: "{}"\n'.format(
-                checkpoint_prefix_path.name,
-                checkpoint_prefix_path.name,
-            )
-        )
-        return checkpoint_path
+        return self.saver.save(self.sess, checkpoint_prefix)
 
     def load_checkpoint(self, checkpoint_prefix):
-        self.checkpoint.read(checkpoint_prefix).assert_existing_objects_matched()
+        self.saver.restore(self.sess, checkpoint_prefix)
 
 
 def shuffle_data(x):
