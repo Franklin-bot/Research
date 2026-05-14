@@ -179,17 +179,11 @@ def render_summary_page(summary_lines):
     return figure
 
 
-def render_training_curves_page(epoch_list, avg_cost_list, avg_recon_list, avg_latent_list):
-    figure = plt.figure(figsize=(11, 8.5))
+def render_training_curve_page(epoch_list, curve_values, curve_label):
+    figure = plt.figure(figsize=(10, 5))
     if epoch_list:
-        plt.plot(epoch_list, avg_cost_list, label="cost")
-        plt.plot(epoch_list, avg_recon_list, label="recon")
-        plt.plot(epoch_list, avg_latent_list, label="latent")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("Training Curves")
+        plt.plot(epoch_list, curve_values, label=curve_label)
         plt.legend()
-        plt.grid(True, alpha=0.3)
     else:
         plt.axis("off")
         plt.text(
@@ -203,16 +197,10 @@ def render_training_curves_page(epoch_list, avg_cost_list, avg_recon_list, avg_l
     return figure
 
 
-def render_feature_page(feature, output_data, test_data, eval_input):
+def render_feature_page(feature, output_data, test_data):
     figure = plt.figure()
     plt.plot(output_data[:, feature], label="reconstructed")
     plt.plot(test_data[:, feature], label="original")
-    plt.plot(
-        eval_input[:, feature],
-        label="evaluation input",
-        linestyle="--",
-        alpha=0.7,
-    )
     plt.title(f"Feature {feature}")
     plt.legend()
     plt.xlabel("Sample Index")
@@ -434,17 +422,32 @@ with PdfPages(pdf_path) as pdf:
     pdf.savefig(summary_figure)
     plt.close(summary_figure)
 
-    curves_figure = render_training_curves_page(
+    cost_figure = render_training_curve_page(
         epoch_list,
         avg_cost_list,
-        avg_recon_list,
-        avg_latent_list,
+        "avg_cost",
     )
-    pdf.savefig(curves_figure)
-    plt.close(curves_figure)
+    pdf.savefig(cost_figure)
+    plt.close(cost_figure)
+
+    recon_figure = render_training_curve_page(
+        epoch_list,
+        avg_recon_list,
+        "avg_recon",
+    )
+    pdf.savefig(recon_figure)
+    plt.close(recon_figure)
+
+    latent_figure = render_training_curve_page(
+        epoch_list,
+        avg_latent_list,
+        "avg_latent",
+    )
+    pdf.savefig(latent_figure)
+    plt.close(latent_figure)
 
     for feature in range(num_features):
-        feature_figure = render_feature_page(feature, output_data, test_data, eval_input)
+        feature_figure = render_feature_page(feature, output_data, test_data)
         pdf.savefig(feature_figure)
         plt.close(feature_figure)
 
