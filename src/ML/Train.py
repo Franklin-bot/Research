@@ -18,6 +18,14 @@ parser.add_argument(
     help="PDF filename written under outputs/ml/plots",
 )
 parser.add_argument(
+    "--run-id",
+    default=None,
+    help=(
+        "Optional run identifier used for the output directory name under "
+        "data/outputs/<data-dir>. Defaults to a timestamp."
+    ),
+)
+parser.add_argument(
     "--epochs",
     type=int,
     default=int(os.environ.get("TRAIN_EPOCHS", "8000")),
@@ -71,7 +79,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 outputs_dir = PROJECT_ROOT / "data" / "outputs" / args.data_dir / run_id
 results_dir = outputs_dir / "results"
 plots_dir = outputs_dir / "plots"
