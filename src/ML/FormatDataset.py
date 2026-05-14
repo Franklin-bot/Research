@@ -13,8 +13,22 @@ REFERENCE_IMUS = [
     "ulna_r_imu",
     "ulna_l_imu",
 ]
+KINEMATICS_COLS = [
+    "lumbar_extension",
+    "lumbar_bending",
+    "lumbar_rotation",
+    "arm_flex_r",
+    "arm_add_r",
+    "arm_rot_r",
+    "elbow_flex_r",
+    "pro_sup_r",
+    "arm_flex_l",
+    "arm_add_l",
+    "arm_rot_l",
+    "elbow_flex_l",
+    "pro_sup_l",
+]
 MASK_VALUE = -2.0
-TRAIN_SPLIT = 0.8
 
 
 def split_many_cols_named(df, n_values, suffixes):
@@ -72,22 +86,7 @@ def read_kinematics(kinematics_path):
 
 
 def create_kinematics_instance(kinematics_data):
-    kinematics_cols = [
-        "lumbar_extension",
-        "lumbar_bending",
-        "lumbar_rotation",
-        "arm_flex_r",
-        "arm_add_r",
-        "arm_rot_r",
-        "elbow_flex_r",
-        "pro_sup_r",
-        "arm_flex_l",
-        "arm_add_l",
-        "arm_rot_l",
-        "elbow_flex_l",
-        "pro_sup_l",
-    ]
-    return kinematics_data.select([pl.col(c) for c in kinematics_cols])
+    return kinematics_data.select([pl.col(c) for c in KINEMATICS_COLS])
 
 
 def create_reference_imu_instance(quaternion_data, velocity_data, acceleration_data):
@@ -177,15 +176,17 @@ def build_reference_dataset_frame(imu_dir, imu_prefix, kinematics_path):
     return pl.concat([kin_current, imu_current, imu_prev], how="horizontal")
 
 
-def build_masked_imu_t_dataset(base_df):
-    imu_t_cols = [c for c in base_df.columns if c.endswith("_t")]
-    masked_imu_t = pl.DataFrame(
-        {c: np.full(base_df.height, MASK_VALUE, dtype=np.float64) for c in imu_t_cols}
+def build_masked_kinematics_dataset(base_df):
+    masked_kinematics = pl.DataFrame(
+        {
+            c: np.full(base_df.height, MASK_VALUE, dtype=np.float64)
+            for c in KINEMATICS_COLS
+        }
     )
     masked_df = pl.concat(
         [
-            base_df.select([pl.col(c) for c in base_df.columns if c not in imu_t_cols]),
-            masked_imu_t,
+            masked_kinematics,
+            base_df.select([pl.col(c) for c in base_df.columns if c not in KINEMATICS_COLS]),
         ],
         how="horizontal",
     ).select([pl.col(c) for c in base_df.columns])
@@ -194,18 +195,11 @@ def build_masked_imu_t_dataset(base_df):
 
 def build_training_and_test_sets(imu_dir, imu_prefix, kinematics_path):
     base_df = build_reference_dataset_frame(imu_dir, imu_prefix, kinematics_path)
-    total_rows = base_df.height
-    train_rows = int(total_rows * TRAIN_SPLIT)
-    if train_rows <= 0 or train_rows >= total_rows:
-        raise ValueError(
-            f"Invalid split for dataset with {total_rows} rows and train ratio {TRAIN_SPLIT}."
-        )
+    train_original = base_df
+    test_original = base_df
+    train_masked_kinematics = build_masked_kinematics_dataset(train_original)
 
-    train_original = base_df.slice(0, train_rows)
-    test_original = base_df.slice(train_rows, total_rows - train_rows)
-    train_masked_imu_t = build_masked_imu_t_dataset(train_original)
-
-    train_inputs = pl.concat([train_original, train_masked_imu_t], how="vertical")
+    train_inputs = pl.concat([train_original, train_masked_kinematics], how="vertical")
     train_targets = pl.concat([train_original, train_original], how="vertical").select(
         [pl.col(c).alias(f"{c}_target") for c in train_original.columns]
     )
@@ -252,6 +246,7 @@ def main():
     )
     write_outputs(train_df, test_df, output_dir)
     print(f"Formatted dataset: {args.data_dir}")
+    print("Scheme: full-dataset training with masked-kinematics augmentation")
     print(f"Train shape: {train_df.shape}")
     print(f"Test shape: {test_df.shape}")
     print(f"Saved train dataset: {output_dir / 'train_data.npy'}")

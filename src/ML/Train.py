@@ -61,11 +61,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--eval-mode",
-    choices=["clean", "masked-imu-t"],
-    default="clean",
+    choices=["clean", "masked-kinematics", "masked-imu-t"],
+    default="masked-kinematics",
     help=(
-        "Evaluation input mode. 'clean' matches the older v1 reconstruction metric; "
-        "'masked-imu-t' evaluates the harder IMU(t) imputation task."
+        "Evaluation input mode. 'masked-kinematics' matches the current full-dataset "
+        "evaluation scheme; 'clean' reconstructs the full input; 'masked-imu-t' "
+        "evaluates the IMU(t) imputation task."
     ),
 )
 args = parser.parse_args()
@@ -145,6 +146,12 @@ def mask_imu_t_features(data, kin_dim, imu_dim, mask_value=MASK_VALUE):
     return masked
 
 
+def mask_kinematics_features(data, kin_dim, mask_value=MASK_VALUE):
+    masked = np.array(data, copy=True)
+    masked[:, :kin_dim] = mask_value
+    return masked
+
+
 epochs = args.epochs
 learning_rate = 0.0001
 batch_size = args.batch_size
@@ -155,6 +162,62 @@ def _format_seconds(seconds):
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{mins}m {secs}s"
+
+
+def render_summary_page(summary_lines):
+    figure = plt.figure(figsize=(8.5, 11))
+    plt.axis("off")
+    plt.text(
+        0.05,
+        0.95,
+        "\n".join(summary_lines),
+        va="top",
+        ha="left",
+        fontsize=12,
+        family="monospace",
+    )
+    return figure
+
+
+def render_training_curves_page(epoch_list, avg_cost_list, avg_recon_list, avg_latent_list):
+    figure = plt.figure(figsize=(11, 8.5))
+    if epoch_list:
+        plt.plot(epoch_list, avg_cost_list, label="cost")
+        plt.plot(epoch_list, avg_recon_list, label="recon")
+        plt.plot(epoch_list, avg_latent_list, label="latent")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training Curves")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+    else:
+        plt.axis("off")
+        plt.text(
+            0.5,
+            0.5,
+            "No training curve points were recorded.",
+            ha="center",
+            va="center",
+            fontsize=14,
+        )
+    return figure
+
+
+def render_feature_page(feature, output_data, test_data, eval_input):
+    figure = plt.figure()
+    plt.plot(output_data[:, feature], label="reconstructed")
+    plt.plot(test_data[:, feature], label="original")
+    plt.plot(
+        eval_input[:, feature],
+        label="evaluation input",
+        linestyle="--",
+        alpha=0.7,
+    )
+    plt.title(f"Feature {feature}")
+    plt.legend()
+    plt.xlabel("Sample Index")
+    plt.ylabel("Feature Value")
+    return figure
 
 
 train_shape = train_data.shape
@@ -254,6 +317,22 @@ epoch_list, avg_cost_list, avg_recon_list, avg_latent_list = VAE.train_whole(
 )
 vae.cleanup()
 
+training_curves = np.column_stack(
+    [
+        np.asarray(epoch_list, dtype=np.float64),
+        np.asarray(avg_cost_list, dtype=np.float64),
+        np.asarray(avg_recon_list, dtype=np.float64),
+        np.asarray(avg_latent_list, dtype=np.float64),
+    ]
+)
+np.savetxt(
+    results_dir / "training_curves.csv",
+    training_curves,
+    delimiter=",",
+    header="epoch,cost,recon,latent",
+    comments="",
+)
+
 network_architecture = network_param()
 print(network_architecture)
 
@@ -273,9 +352,13 @@ print("Model restored.")
 
 print("Test 1")
 masked_test_data = mask_imu_t_features(test_data, kin_dim, imu_dim)
+masked_kinematics_test_data = mask_kinematics_features(test_data, kin_dim)
 if args.eval_mode == "clean":
     eval_input = test_data
     eval_label = "clean reconstruction input"
+elif args.eval_mode == "masked-kinematics":
+    eval_input = masked_kinematics_test_data
+    eval_label = "masked kinematics input"
 else:
     eval_input = masked_test_data
     eval_label = "masked imu_t input"
@@ -291,68 +374,83 @@ print("Output Data Saved!")
 
 # Quick summary metrics and preview plot
 imu_t_end = kin_dim + (imu_dim // 2)
-mse_total = float(np.mean((test_data - output_data) ** 2))
-mse_kin = float(np.mean((test_data[:, :kin_dim] - output_data[:, :kin_dim]) ** 2))
-mse_imu = float(np.mean((test_data[:, kin_dim:] - output_data[:, kin_dim:]) ** 2))
-mse_imu_t = float(
-    np.mean((test_data[:, kin_dim:imu_t_end] - output_data[:, kin_dim:imu_t_end]) ** 2)
-)
-mse_imu_tminus1 = float(
-    np.mean((test_data[:, imu_t_end:] - output_data[:, imu_t_end:]) ** 2)
-)
+sqerr_total = (test_data - output_data) ** 2
+sqerr_kin = (test_data[:, :kin_dim] - output_data[:, :kin_dim]) ** 2
+sqerr_imu = (test_data[:, kin_dim:] - output_data[:, kin_dim:]) ** 2
+sqerr_imu_t = (test_data[:, kin_dim:imu_t_end] - output_data[:, kin_dim:imu_t_end]) ** 2
+sqerr_imu_tminus1 = (test_data[:, imu_t_end:] - output_data[:, imu_t_end:]) ** 2
+
+mse_total = float(np.mean(sqerr_total))
+mse_kin = float(np.mean(sqerr_kin))
+mse_imu = float(np.mean(sqerr_imu))
+mse_imu_t = float(np.mean(sqerr_imu_t))
+mse_imu_tminus1 = float(np.mean(sqerr_imu_tminus1))
+
+std_total = float(np.std(sqerr_total))
+std_kin = float(np.std(sqerr_kin))
+std_imu = float(np.std(sqerr_imu))
+std_imu_t = float(np.std(sqerr_imu_t))
+std_imu_tminus1 = float(np.std(sqerr_imu_tminus1))
+
 print(f"MSE total: {mse_total:.8f}")
 print(f"MSE kinematics: {mse_kin:.8f}")
 print(f"MSE IMU: {mse_imu:.8f}")
 print(f"MSE IMU(t): {mse_imu_t:.8f}")
 print(f"MSE IMU(t-1): {mse_imu_tminus1:.8f}")
+print(f"STD total: {std_total:.8f}")
+print(f"STD kinematics: {std_kin:.8f}")
+print(f"STD IMU: {std_imu:.8f}")
+print(f"STD IMU(t): {std_imu_t:.8f}")
+print(f"STD IMU(t-1): {std_imu_tminus1:.8f}")
 
 pdf_path = plots_dir / args.plot_filename
 
+summary_lines = [
+    "Run Summary",
+    "",
+    f"Dataset: {args.data_dir}",
+    f"Run ID: {run_id}",
+    f"Train shape: {train_shape}",
+    f"Test shape: {test_shape}",
+    f"Evaluation input: {eval_label}, clean target",
+    "",
+    f"MSE total: {mse_total:.8f}",
+    f"MSE kinematics: {mse_kin:.8f}",
+    f"MSE IMU: {mse_imu:.8f}",
+    f"MSE IMU(t): {mse_imu_t:.8f}",
+    f"MSE IMU(t-1): {mse_imu_tminus1:.8f}",
+    f"STD total: {std_total:.8f}",
+    f"STD kinematics: {std_kin:.8f}",
+    f"STD IMU: {std_imu:.8f}",
+    f"STD IMU(t): {std_imu_t:.8f}",
+    f"STD IMU(t-1): {std_imu_tminus1:.8f}",
+    "",
+    f"Results CSV: {results_dir / 'output_data.csv'}",
+    f"Checkpoint prefix: {checkpoint_prefix}",
+]
+
 with PdfPages(pdf_path) as pdf:
-    plt.figure(figsize=(8.5, 11))
-    plt.axis("off")
-    summary_lines = [
-        "Run Summary",
-        "",
-        f"Dataset: {args.data_dir}",
-        f"Run ID: {run_id}",
-        f"Train shape: {train_shape}",
-        f"Test shape: {test_shape}",
-        f"Evaluation input: {eval_label}, clean target",
-        "",
-        f"MSE total: {mse_total:.8f}",
-        f"MSE kinematics: {mse_kin:.8f}",
-        f"MSE IMU: {mse_imu:.8f}",
-        f"MSE IMU(t): {mse_imu_t:.8f}",
-        f"MSE IMU(t-1): {mse_imu_tminus1:.8f}",
-        "",
-        f"Results CSV: {results_dir / 'output_data.csv'}",
-        f"Checkpoint prefix: {checkpoint_prefix}",
-    ]
-    plt.text(
-        0.05,
-        0.95,
-        "\n".join(summary_lines),
-        va="top",
-        ha="left",
-        fontsize=12,
-        family="monospace",
+    summary_figure = render_summary_page(summary_lines)
+    pdf.savefig(summary_figure)
+    plt.close(summary_figure)
+
+    curves_figure = render_training_curves_page(
+        epoch_list,
+        avg_cost_list,
+        avg_recon_list,
+        avg_latent_list,
     )
-    pdf.savefig()
-    plt.close()
+    pdf.savefig(curves_figure)
+    plt.close(curves_figure)
 
     for feature in range(num_features):
-        plt.figure()
-        plt.plot(output_data[:, feature], label="reconstructed")
-        plt.plot(test_data[:, feature], label="original")
-        plt.plot(eval_input[:, feature], label="evaluation input", linestyle="--", alpha=0.7)
-        plt.title(f"Feature {feature}")
-        plt.legend()
-        plt.xlabel("Sample Index")
-        plt.ylabel("Feature Value")
-        pdf.savefig()
-        plt.close()
+        feature_figure = render_feature_page(feature, output_data, test_data, eval_input)
+        pdf.savefig(feature_figure)
+        plt.close(feature_figure)
+
+(results_dir / "run_summary.txt").write_text("\n".join(summary_lines) + "\n")
 
 print(f"Plots saved: {pdf_path}")
 print(f"Results saved: {results_dir / 'output_data.csv'}")
+print(f"Training curves saved: {results_dir / 'training_curves.csv'}")
 print(f"Model checkpoint prefix: {checkpoint_prefix}")
