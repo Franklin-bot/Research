@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from DatasetLogging import build_eval_layout_summary, build_training_layout_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODEL_BASENAME = "model_1"
@@ -129,6 +130,14 @@ if test_data.shape[1] != input_dim:
         f"Feature mismatch: input={input_dim}, test={test_data.shape[1]}. "
         "Test feature dimensions must match the model input."
     )
+
+training_layout_summary = build_training_layout_summary(
+    train_data,
+    input_dim=input_dim,
+    kin_dim=kin_dim,
+    mask_value=MASK_VALUE,
+)
+print(training_layout_summary)
 
 
 def network_param():
@@ -358,6 +367,14 @@ elif args.eval_mode == "masked-kinematics":
 else:
     eval_input = masked_test_data
     eval_label = "masked imu_t input"
+eval_layout_summary = build_eval_layout_summary(
+    args.eval_mode,
+    input_dim=input_dim,
+    kin_dim=kin_dim,
+    imu_dim=imu_dim,
+    mask_value=MASK_VALUE,
+)
+print(eval_layout_summary)
 output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(eval_input)
 model.cleanup()
 
@@ -408,6 +425,11 @@ summary_lines = [
     f"Run ID: {run_id}",
     f"Train shape: {train_shape}",
     f"Test shape: {test_shape}",
+    "",
+    training_layout_summary,
+    "",
+    eval_layout_summary,
+    "",
     f"Evaluation input: {eval_label}, clean target",
     "",
     f"MSE total: {mse_total:.8f}",
