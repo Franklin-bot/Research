@@ -1,33 +1,22 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 
+from VirtualIMULocations import (
+    KINEMATICS_COLS,
+    LOCATION_NAMES,
+    build_virtual_imu_names,
+    flatten_virtual_imu_names,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MOTIONS_DIR = PROJECT_ROOT / "data" / "motions"
 ML_DATA_ROOT = PROJECT_ROOT / "data" / "ml"
-REFERENCE_IMUS = [
-    "humerus_r_imu",
-    "humerus_l_imu",
-    "ulna_r_imu",
-    "ulna_l_imu",
-]
-KINEMATICS_COLS = [
-    "lumbar_extension",
-    "lumbar_bending",
-    "lumbar_rotation",
-    "arm_flex_r",
-    "arm_add_r",
-    "arm_rot_r",
-    "elbow_flex_r",
-    "pro_sup_r",
-    "arm_flex_l",
-    "arm_add_l",
-    "arm_rot_l",
-    "elbow_flex_l",
-    "pro_sup_l",
-]
+VIRTUAL_IMUS_BY_LOCATION = build_virtual_imu_names()
+VIRTUAL_IMUS = flatten_virtual_imu_names(VIRTUAL_IMUS_BY_LOCATION)
 MASK_VALUE = -2.0
 
 
@@ -47,11 +36,11 @@ def split_many_cols_named(df, n_values, suffixes):
     return df.select(out)
 
 
-def select_reference_imu_columns(df):
-    missing = [c for c in REFERENCE_IMUS if c not in df.columns]
+def select_virtual_imu_columns(df):
+    missing = [c for c in VIRTUAL_IMUS if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing reference IMU columns: {missing}")
-    return df.select([pl.col(c) for c in REFERENCE_IMUS])
+        raise ValueError(f"Missing virtual IMU columns: {missing}")
+    return df.select([pl.col(c) for c in VIRTUAL_IMUS])
 
 
 def read_imu_tables(imu_dir, imu_prefix):
@@ -89,19 +78,19 @@ def create_kinematics_instance(kinematics_data):
     return kinematics_data.select([pl.col(c) for c in KINEMATICS_COLS])
 
 
-def create_reference_imu_instance(quaternion_data, velocity_data, acceleration_data):
+def create_virtual_imu_instance(quaternion_data, velocity_data, acceleration_data):
     q = split_many_cols_named(
-        select_reference_imu_columns(quaternion_data),
+        select_virtual_imu_columns(quaternion_data),
         4,
         ["qw", "qx", "qy", "qz"],
     )
     v = split_many_cols_named(
-        select_reference_imu_columns(velocity_data),
+        select_virtual_imu_columns(velocity_data),
         3,
         ["vx", "vy", "vz"],
     )
     a = split_many_cols_named(
-        select_reference_imu_columns(acceleration_data),
+        select_virtual_imu_columns(acceleration_data),
         3,
         ["ax", "ay", "az"],
     )
@@ -153,7 +142,11 @@ def build_reference_dataset_frame(imu_dir, imu_prefix, kinematics_path):
     quaternion_data, velocity_data, acceleration_data = read_imu_tables(imu_dir, imu_prefix)
     kinematics_data = read_kinematics(kinematics_path)
     kin_df = create_kinematics_instance(kinematics_data)
-    imu_df = create_reference_imu_instance(quaternion_data, velocity_data, acceleration_data)
+    imu_df = create_virtual_imu_instance(
+        quaternion_data,
+        velocity_data,
+        acceleration_data,
+    )
     kin_df, imu_df = align_kinematics_to_imu_time(
         kinematics_data,
         kin_df,
@@ -214,6 +207,16 @@ def write_outputs(train_df, test_df, output_dir):
     np.save(output_dir / "test_data.npy", test_df.to_numpy())
     (output_dir / "train_columns.txt").write_text("\n".join(train_df.columns) + "\n")
     (output_dir / "test_columns.txt").write_text("\n".join(test_df.columns) + "\n")
+    (output_dir / "imu_locations.json").write_text(
+        json.dumps(
+            {
+                "location_names": LOCATION_NAMES,
+                "imu_names_by_location": VIRTUAL_IMUS_BY_LOCATION,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def main():
@@ -246,7 +249,11 @@ def main():
     )
     write_outputs(train_df, test_df, output_dir)
     print(f"Formatted dataset: {args.data_dir}")
-    print("Scheme: full-dataset training with masked-kinematics augmentation")
+    print(
+        "Scheme: virtual-location IMUs with masked-kinematics training "
+        "augmentation"
+    )
+    print(f"IMU locations: {', '.join(LOCATION_NAMES)}")
     print(f"Train shape: {train_df.shape}")
     print(f"Test shape: {test_df.shape}")
     print(f"Saved train dataset: {output_dir / 'train_data.npy'}")

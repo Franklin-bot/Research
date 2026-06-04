@@ -156,3 +156,4 @@ cython_debug/
 data/motions
 data/ml
 data/
+*_job*/

@@ -68,6 +68,19 @@ def build_eval_layout_summary(eval_mode, input_dim, kin_dim, imu_dim, mask_value
             f"  eval input: test_data with IMU(t) columns {kin_dim}:{imu_t_end} "
             f"set to {mask_value}"
         )
+    elif eval_mode == "masked-kinematics-and-imus-by-location":
+        lines.extend(
+            [
+                (
+                    "  eval input: five runs with kinematics columns "
+                    f"0:{kin_dim} set to {mask_value}"
+                ),
+                (
+                    "  each run masks all IMU columns except one retained "
+                    "virtual IMU location set"
+                ),
+            ]
+        )
     else:
         lines.append(f"  eval input: unknown mode {eval_mode}")
 

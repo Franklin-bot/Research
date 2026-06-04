@@ -1,5 +1,6 @@
 import os
 import argparse
+import json
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +8,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from DatasetLogging import build_eval_layout_summary, build_training_layout_summary
+from VirtualIMULocations import (
+    LOCATION_NAMES,
+    build_location_column_indices,
+    build_virtual_imu_names,
+    mask_except_location,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODEL_BASENAME = "model_1"
@@ -70,12 +77,19 @@ parser.add_argument(
 )
 parser.add_argument(
     "--eval-mode",
-    choices=["clean", "masked-kinematics", "masked-imu-t"],
-    default="masked-kinematics",
+    choices=[
+        "clean",
+        "masked-kinematics",
+        "masked-imu-t",
+        "masked-kinematics-and-imus-by-location",
+    ],
+    default="masked-kinematics-and-imus-by-location",
     help=(
-        "Evaluation input mode. 'masked-kinematics' matches the current full-dataset "
-        "evaluation scheme; 'clean' reconstructs the full input; 'masked-imu-t' "
-        "evaluates the IMU(t) imputation task."
+        "Evaluation input mode. 'masked-kinematics-and-imus-by-location' masks "
+        "kinematics and all IMUs except one retained location set, repeated for "
+        "each virtual IMU location; 'masked-kinematics' keeps all IMUs visible; "
+        "'clean' reconstructs the full input; 'masked-imu-t' evaluates the "
+        "IMU(t) imputation task."
     ),
 )
 args = parser.parse_args()
@@ -100,6 +114,8 @@ ML_DATA_DIR = (
 )
 TRAIN_DATA_PATH = ML_DATA_DIR / "train_data.npy"
 TEST_DATA_PATH = ML_DATA_DIR / "test_data.npy"
+TEST_COLUMNS_PATH = ML_DATA_DIR / "test_columns.txt"
+IMU_LOCATIONS_PATH = ML_DATA_DIR / "imu_locations.json"
 
 if not TRAIN_DATA_PATH.exists() or not TEST_DATA_PATH.exists():
     raise FileNotFoundError(
@@ -109,6 +125,10 @@ if not TRAIN_DATA_PATH.exists() or not TEST_DATA_PATH.exists():
 
 train_data = np.load(TRAIN_DATA_PATH)
 test_data = np.load(TEST_DATA_PATH)
+if TEST_COLUMNS_PATH.exists():
+    test_columns = TEST_COLUMNS_PATH.read_text().splitlines()
+else:
+    test_columns = [f"feature_{i}" for i in range(test_data.shape[1])]
 
 print(f"Train Data (augmented paired): {train_data.shape}")
 print(f"Test Data: {test_data.shape}")
@@ -129,6 +149,11 @@ if test_data.shape[1] != input_dim:
     raise ValueError(
         f"Feature mismatch: input={input_dim}, test={test_data.shape[1]}. "
         "Test feature dimensions must match the model input."
+    )
+
+if len(test_columns) != input_dim:
+    raise ValueError(
+        f"Expected {input_dim} test column names, got {len(test_columns)}."
     )
 
 training_layout_summary = build_training_layout_summary(
@@ -167,6 +192,82 @@ def mask_kinematics_features(data, kin_dim, mask_value=MASK_VALUE):
     masked = np.array(data, copy=True)
     masked[:, :kin_dim] = mask_value
     return masked
+
+
+def load_imu_locations():
+    if not IMU_LOCATIONS_PATH.exists():
+        return build_virtual_imu_names()
+
+    with IMU_LOCATIONS_PATH.open() as f:
+        payload = json.load(f)
+    return payload["imu_names_by_location"]
+
+
+def build_eval_runs(data):
+    masked_test_data = mask_imu_t_features(data, kin_dim, imu_dim)
+    masked_kinematics_test_data = mask_kinematics_features(data, kin_dim)
+
+    if args.eval_mode == "clean":
+        return [("clean", "clean reconstruction input", data)]
+
+    if args.eval_mode == "masked-kinematics":
+        return [
+            (
+                "masked_kinematics",
+                "masked kinematics input",
+                masked_kinematics_test_data,
+            )
+        ]
+
+    if args.eval_mode == "masked-imu-t":
+        return [("masked_imu_t", "masked imu_t input", masked_test_data)]
+
+    imu_names_by_location = load_imu_locations()
+    indices_by_location = build_location_column_indices(
+        test_columns,
+        imu_names_by_location,
+    )
+    return [
+        (
+            f"retain_{location}",
+            f"masked kinematics and IMUs except {location} location input",
+            mask_except_location(
+                data,
+                test_columns,
+                indices_by_location,
+                location,
+                kin_dim=kin_dim,
+                mask_value=MASK_VALUE,
+            ),
+        )
+        for location in LOCATION_NAMES
+    ]
+
+
+def compute_metrics(target_data, output_data):
+    imu_t_end = kin_dim + (imu_dim // 2)
+    sqerr_total = (target_data - output_data) ** 2
+    sqerr_kin = (target_data[:, :kin_dim] - output_data[:, :kin_dim]) ** 2
+    sqerr_imu = (target_data[:, kin_dim:] - output_data[:, kin_dim:]) ** 2
+    sqerr_imu_t = (
+        target_data[:, kin_dim:imu_t_end] - output_data[:, kin_dim:imu_t_end]
+    ) ** 2
+    sqerr_imu_tminus1 = (
+        target_data[:, imu_t_end:] - output_data[:, imu_t_end:]
+    ) ** 2
+
+    return {
+        "mse_total": float(np.mean(sqerr_total)),
+        "mse_kin": float(np.mean(sqerr_kin)),
+        "mse_imu": float(np.mean(sqerr_imu)),
+        "mse_imu_t": float(np.mean(sqerr_imu_t)),
+        "mse_imu_tminus1": float(np.mean(sqerr_imu_tminus1)),
+        "std_total": float(np.std(sqerr_total)),
+        "std_kin": float(np.std(sqerr_kin)),
+        "std_imu": float(np.std(sqerr_imu)),
+        "std_imu_t": float(np.std(sqerr_imu_t)),
+        "std_imu_tminus1": float(np.std(sqerr_imu_tminus1)),
+    }
 
 
 epochs = args.epochs
@@ -355,18 +456,8 @@ with infer_scope:
 model.load_checkpoint(str(checkpoint_prefix))
 print("Model restored.")
 
-print("Test 1")
-masked_test_data = mask_imu_t_features(test_data, kin_dim, imu_dim)
-masked_kinematics_test_data = mask_kinematics_features(test_data, kin_dim)
-if args.eval_mode == "clean":
-    eval_input = test_data
-    eval_label = "clean reconstruction input"
-elif args.eval_mode == "masked-kinematics":
-    eval_input = masked_kinematics_test_data
-    eval_label = "masked kinematics input"
-else:
-    eval_input = masked_test_data
-    eval_label = "masked imu_t input"
+print("Test")
+eval_runs = build_eval_runs(test_data)
 eval_layout_summary = build_eval_layout_summary(
     args.eval_mode,
     input_dim=input_dim,
@@ -375,46 +466,50 @@ eval_layout_summary = build_eval_layout_summary(
     mask_value=MASK_VALUE,
 )
 print(eval_layout_summary)
-output_data, x_reconstruct_log_sigma_sq_1 = model.reconstruct(eval_input)
+outputs_by_run = []
+for eval_key, eval_label, eval_input in eval_runs:
+    print(f"Reconstructing: {eval_label}")
+    output_data_for_run, _ = model.reconstruct(eval_input)
+    outputs_by_run.append((eval_key, eval_label, output_data_for_run))
 model.cleanup()
 
-np.savetxt(
-    results_dir / "output_data.csv",
-    output_data,
-    delimiter=",",
-)
+first_eval_key, first_eval_label, output_data = outputs_by_run[0]
+for eval_key, _, output_data_for_run in outputs_by_run:
+    output_filename = (
+        "output_data.csv"
+        if len(outputs_by_run) == 1
+        else f"output_data_{eval_key}.csv"
+    )
+    np.savetxt(
+        results_dir / output_filename,
+        output_data_for_run,
+        delimiter=",",
+    )
+if len(outputs_by_run) > 1:
+    np.savetxt(
+        results_dir / "output_data.csv",
+        output_data,
+        delimiter=",",
+    )
 print("Output Data Saved!")
 
 # Quick summary metrics and preview plot
-imu_t_end = kin_dim + (imu_dim // 2)
-sqerr_total = (test_data - output_data) ** 2
-sqerr_kin = (test_data[:, :kin_dim] - output_data[:, :kin_dim]) ** 2
-sqerr_imu = (test_data[:, kin_dim:] - output_data[:, kin_dim:]) ** 2
-sqerr_imu_t = (test_data[:, kin_dim:imu_t_end] - output_data[:, kin_dim:imu_t_end]) ** 2
-sqerr_imu_tminus1 = (test_data[:, imu_t_end:] - output_data[:, imu_t_end:]) ** 2
+metrics_by_run = []
+for eval_key, eval_label, output_data_for_run in outputs_by_run:
+    metrics = compute_metrics(test_data, output_data_for_run)
+    metrics_by_run.append((eval_key, eval_label, metrics))
 
-mse_total = float(np.mean(sqerr_total))
-mse_kin = float(np.mean(sqerr_kin))
-mse_imu = float(np.mean(sqerr_imu))
-mse_imu_t = float(np.mean(sqerr_imu_t))
-mse_imu_tminus1 = float(np.mean(sqerr_imu_tminus1))
-
-std_total = float(np.std(sqerr_total))
-std_kin = float(np.std(sqerr_kin))
-std_imu = float(np.std(sqerr_imu))
-std_imu_t = float(np.std(sqerr_imu_t))
-std_imu_tminus1 = float(np.std(sqerr_imu_tminus1))
-
-print(f"MSE total: {mse_total:.8f}")
-print(f"MSE kinematics: {mse_kin:.8f}")
-print(f"MSE IMU: {mse_imu:.8f}")
-print(f"MSE IMU(t): {mse_imu_t:.8f}")
-print(f"MSE IMU(t-1): {mse_imu_tminus1:.8f}")
-print(f"STD total: {std_total:.8f}")
-print(f"STD kinematics: {std_kin:.8f}")
-print(f"STD IMU: {std_imu:.8f}")
-print(f"STD IMU(t): {std_imu_t:.8f}")
-print(f"STD IMU(t-1): {std_imu_tminus1:.8f}")
+    print(f"Evaluation: {eval_label}")
+    print(f"MSE total: {metrics['mse_total']:.8f}")
+    print(f"MSE kinematics: {metrics['mse_kin']:.8f}")
+    print(f"MSE IMU: {metrics['mse_imu']:.8f}")
+    print(f"MSE IMU(t): {metrics['mse_imu_t']:.8f}")
+    print(f"MSE IMU(t-1): {metrics['mse_imu_tminus1']:.8f}")
+    print(f"STD total: {metrics['std_total']:.8f}")
+    print(f"STD kinematics: {metrics['std_kin']:.8f}")
+    print(f"STD IMU: {metrics['std_imu']:.8f}")
+    print(f"STD IMU(t): {metrics['std_imu_t']:.8f}")
+    print(f"STD IMU(t-1): {metrics['std_imu_tminus1']:.8f}")
 
 pdf_path = plots_dir / args.plot_filename
 
@@ -430,22 +525,33 @@ summary_lines = [
     "",
     eval_layout_summary,
     "",
-    f"Evaluation input: {eval_label}, clean target",
+    f"Primary evaluation input: {first_eval_label}, clean target",
     "",
-    f"MSE total: {mse_total:.8f}",
-    f"MSE kinematics: {mse_kin:.8f}",
-    f"MSE IMU: {mse_imu:.8f}",
-    f"MSE IMU(t): {mse_imu_t:.8f}",
-    f"MSE IMU(t-1): {mse_imu_tminus1:.8f}",
-    f"STD total: {std_total:.8f}",
-    f"STD kinematics: {std_kin:.8f}",
-    f"STD IMU: {std_imu:.8f}",
-    f"STD IMU(t): {std_imu_t:.8f}",
-    f"STD IMU(t-1): {std_imu_tminus1:.8f}",
-    "",
-    f"Results CSV: {results_dir / 'output_data.csv'}",
-    f"Checkpoint prefix: {checkpoint_prefix}",
+    "Evaluation metrics:",
 ]
+for _, eval_label, metrics in metrics_by_run:
+    summary_lines.extend(
+        [
+            f"  {eval_label}",
+            f"    MSE total: {metrics['mse_total']:.8f}",
+            f"    MSE kinematics: {metrics['mse_kin']:.8f}",
+            f"    MSE IMU: {metrics['mse_imu']:.8f}",
+            f"    MSE IMU(t): {metrics['mse_imu_t']:.8f}",
+            f"    MSE IMU(t-1): {metrics['mse_imu_tminus1']:.8f}",
+            f"    STD total: {metrics['std_total']:.8f}",
+            f"    STD kinematics: {metrics['std_kin']:.8f}",
+            f"    STD IMU: {metrics['std_imu']:.8f}",
+            f"    STD IMU(t): {metrics['std_imu_t']:.8f}",
+            f"    STD IMU(t-1): {metrics['std_imu_tminus1']:.8f}",
+        ]
+    )
+summary_lines.extend(
+    [
+        "",
+        f"Results CSV: {results_dir / 'output_data.csv'}",
+        f"Checkpoint prefix: {checkpoint_prefix}",
+    ]
+)
 
 with PdfPages(pdf_path) as pdf:
     summary_figure = render_summary_page(summary_lines)
