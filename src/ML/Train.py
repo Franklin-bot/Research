@@ -100,6 +100,7 @@ ML_DATA_DIR = (
 )
 TRAIN_DATA_PATH = ML_DATA_DIR / "train_data.npy"
 TEST_DATA_PATH = ML_DATA_DIR / "test_data.npy"
+TEST_COLUMNS_PATH = ML_DATA_DIR / "test_columns.txt"
 
 if not TRAIN_DATA_PATH.exists() or not TEST_DATA_PATH.exists():
     raise FileNotFoundError(
@@ -109,6 +110,13 @@ if not TRAIN_DATA_PATH.exists() or not TEST_DATA_PATH.exists():
 
 train_data = np.load(TRAIN_DATA_PATH)
 test_data = np.load(TEST_DATA_PATH)
+test_columns = None
+if TEST_COLUMNS_PATH.exists():
+    test_columns = [
+        column.strip()
+        for column in TEST_COLUMNS_PATH.read_text().splitlines()
+        if column.strip()
+    ]
 
 print(f"Train Data (augmented paired): {train_data.shape}")
 print(f"Test Data: {test_data.shape}")
@@ -130,6 +138,25 @@ if test_data.shape[1] != input_dim:
         f"Feature mismatch: input={input_dim}, test={test_data.shape[1]}. "
         "Test feature dimensions must match the model input."
     )
+
+test_csv_header = ""
+if test_columns is not None:
+    if len(test_columns) != test_data.shape[1]:
+        print(
+            "Warning: test_columns.txt column count does not match test_data; "
+            "writing test_data.csv without a header."
+        )
+    else:
+        test_csv_header = ",".join(test_columns)
+
+np.savetxt(
+    results_dir / "test_data.csv",
+    test_data,
+    delimiter=",",
+    header=test_csv_header,
+    comments="",
+)
+print(f"Test data CSV saved: {results_dir / 'test_data.csv'}")
 
 training_layout_summary = build_training_layout_summary(
     train_data,
